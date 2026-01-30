@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.18)
 project(TorchCodec)
 set(CMAKE_CXX_STANDARD 17)
+# Enable HIP language support if building with ROCm
+# TODO:This can be removed once we remove the hip kernels and use RPP instead.
+if(ENABLE_ROCM)
+    enable_language(HIP)
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(PYBIND11_FINDPYTHON ON)
@@ -118,6 +123,12 @@ function(make_torchcodec_libraries
 	    list(APPEND core_sources CudaDeviceInterface.cpp BetaCudaDeviceInterface.cpp NVDECCache.cpp CUDACommon.cpp NVCUVIDRuntimeLoader.cpp)
     endif()
 
+    if(ENABLE_ROCM)
+        list(APPEND core_sources RocmDeviceInterface.cpp RocDecCache.cpp RocmCommon.cpp RocDecodeRuntimeLoader.cpp rocdecode_kernels/colorspace_kernels.cpp)
+        # Mark the HIP kernel file to be compiled with HIP compiler
+        set_source_files_properties(rocdecode_kernels/colorspace_kernels.cpp PROPERTIES LANGUAGE HIP)
+    endif()
+
     set(core_library_dependencies
         ${ffmpeg_target}
         ${TORCH_LIBRARIES}
@@ -127,6 +138,17 @@ function(make_torchcodec_libraries
         list(APPEND core_library_dependencies
             ${CUDA_nppi_LIBRARY}
             ${CUDA_nppicc_LIBRARY}
+        )
+    endif()
+
+    if(ENABLE_ROCM)
+        # Find HIP package for ROCm
+        find_package(hip REQUIRED)
+        
+        # Add HIP and RPP (ROCm Performance Primitives) libraries
+        list(APPEND core_library_dependencies
+            hip::host
+            rpp
         )
     endif()
 

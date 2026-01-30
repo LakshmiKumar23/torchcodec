@@ -19,7 +19,7 @@ specifying either of these dependencies in our pyproject.toml file.
 
 Why we don't specify torch as a runtime dep: I'm not 100% sure, all I know is
 that no project does it and those who tried had tons of problems. I think it has
-to do with the fact that there are different flavours of torch (cpu, cuda, etc.)
+to do with the fact that there are different flavours of torch (cpu, cuda, rocm, etc.)
 and the pyproject.toml system does not allow a fine-grained enough control over
 that.
 
@@ -112,6 +112,7 @@ class CMakeBuild(build_ext):
         torch_dir = Path(torch.utils.cmake_prefix_path) / "Torch"
         cmake_build_type = os.environ.get("CMAKE_BUILD_TYPE", "Release")
         enable_cuda = os.environ.get("ENABLE_CUDA", "")
+        enable_rocm = os.environ.get("ENABLE_ROCM", "")
         torchcodec_disable_compile_warning_as_error = os.environ.get(
             "TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR", "OFF"
         )
@@ -126,6 +127,7 @@ class CMakeBuild(build_ext):
             f"-DCMAKE_BUILD_TYPE={cmake_build_type}",
             f"-DPYTHON_VERSION={python_version.major}.{python_version.minor}",
             f"-DENABLE_CUDA={enable_cuda}",
+            f"-DENABLE_ROCM={enable_rocm}",
             f"-DTORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR={torchcodec_disable_compile_warning_as_error}",
             f"-DTORCHCODEC_DISABLE_HOMEBREW_RPATH={torchcodec_disable_homebrew_rpath}",
         ]

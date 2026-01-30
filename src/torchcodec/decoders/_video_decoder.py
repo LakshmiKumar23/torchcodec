@@ -42,8 +42,8 @@ class CpuFallbackStatus:
 
     status_known: bool = False
     """Whether the fallback status has been determined.
-    For the Beta CUDA backend (see :func:`~torchcodec.decoders.set_cuda_backend`),
-    this is always ``True`` immediately after decoder creation.
+    For the Beta CUDA backend (see :func:`~torchcodec.decoders.set_cuda_backend`)
+    and ROCm backend, this is always ``True`` immediately after decoder creation.
     For the FFmpeg CUDA backend, this becomes ``True`` after decoding
     the first frame."""
     _nvcuvid_unavailable: bool = field(default=False, init=False)
@@ -112,8 +112,11 @@ class VideoDecoder:
             Default: 1.
         device (str or torch.device, optional): The device to use for decoding.
             If ``None`` (default), uses the current default device.
-            If you pass a CUDA device, we recommend trying the "beta" CUDA
-            backend which is faster! See :func:`~torchcodec.decoders.set_cuda_backend`.
+            If you pass a CUDA device:
+            
+            - For NVIDIA GPUs: We recommend trying the "beta" CUDA
+              backend which is faster! See :func:`~torchcodec.decoders.set_cuda_backend`.
+            - For AMD GPUs (ROCm): Hardware decoding via rocDecode is used automatically.
         seek_mode (str, optional): Determines if frame access will be "exact" or
             "approximate". Exact guarantees that requesting frame i will always
             return frame i, but doing so requires an initial :term:`scan` of the
@@ -224,7 +227,15 @@ class VideoDecoder:
         elif isinstance(device, torch_device):
             device = str(device)
 
-        device_variant = _get_cuda_backend()
+        # For ROCm (AMD GPUs), we don't use variants since rocDecode is the default
+        # For CUDA (NVIDIA GPUs), we use the backend specified by set_cuda_backend()
+        if device.startswith("cuda") and torch.version.hip:
+            # ROCm path - no variant needed
+            device_variant = "ffmpeg"  # Default, but won't be used for ROCm
+        else:
+            # CUDA path - use the backend specified by set_cuda_backend()
+            device_variant = _get_cuda_backend()
+        
         transform_specs = _make_transform_specs(
             transforms,
             input_dims=(self.metadata.height, self.metadata.width),
@@ -243,7 +254,10 @@ class VideoDecoder:
 
         self._cpu_fallback = CpuFallbackStatus()
         if device.startswith("cuda"):
-            if device_variant == "beta":
+            if torch.version.hip:
+                # ROCm (AMD GPU)
+                self._cpu_fallback._backend = "ROCm"
+            elif device_variant == "beta":
                 self._cpu_fallback._backend = "Beta CUDA"
             else:
                 self._cpu_fallback._backend = "FFmpeg CUDA"
