@@ -28,6 +28,11 @@ if [[ "$ENABLE_CUDA" -eq 1 ]]; then
   ffmpeg_versions=(5 6 7)
 fi
 
+# ROCm uses the same FFmpeg version constraints as CUDA
+if [[ "$ENABLE_ROCM" -eq 1 ]]; then
+  ffmpeg_versions=(5 6 7)
+fi
+
 for ffmpeg_major_version in ${ffmpeg_versions[@]}; do
     assert_in_wheel $wheel_path torchcodec/libtorchcodec${ffmpeg_major_version}.${ext}
 done
