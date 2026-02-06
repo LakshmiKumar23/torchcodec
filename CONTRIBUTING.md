@@ -47,7 +47,8 @@ cd torchcodec
 export TORCHCODEC_CMAKE_BUILD_DIR="${PWD}/build"
 
 pip install -e ".[dev]" --no-build-isolation -vv
-# Or, for cuda support: ENABLE_CUDA=1 pip install -e ".[dev]" --no-build-isolation -vv
+# Or, for CUDA support: ENABLE_CUDA=1 pip install -e ".[dev]" --no-build-isolation -vv
+# Or, for ROCm support: ENABLE_ROCM=1 pip install -e ".[dev]" --no-build-isolation -vv
 ```
 
 ### Running unit tests

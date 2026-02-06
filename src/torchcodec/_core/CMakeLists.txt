@@ -15,6 +15,12 @@ find_package(Python3 ${PYTHON_VERSION} EXACT COMPONENTS Development)
 
 if(DEFINED TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR AND TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR)
     set(TORCHCODEC_WERROR_OPTION "")
+elseif(ENABLE_ROCM)
+    # ROCm: PyTorch's ROCm config injects -Wno-duplicate-decl-specifier (C-only) into
+    # compile flags. The C++ compiler reports "valid for C/ObjC but not for C++" and
+    # treats it as an error (not downgradable via -Wno-error=). Use warnings-only for
+    # ROCm so the build succeeds; warnings still appear, just not as errors.
+    set(TORCHCODEC_WERROR_OPTION "")
 else()
     if (WIN32)
         # TODO set warnings as errors on Windows as well.
@@ -38,7 +44,6 @@ if (WIN32)
 else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -pedantic ${TORCHCODEC_WERROR_OPTION} ${TORCH_CXX_FLAGS}")
 endif()
-
 
 function(make_torchcodec_sublibrary
     library_name
