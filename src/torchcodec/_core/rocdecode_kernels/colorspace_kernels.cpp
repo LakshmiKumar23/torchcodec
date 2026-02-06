@@ -39,8 +39,20 @@ __constant__ float yuv_to_rgb_mat[3][3];
 __constant__ float rgb_to_yuv_mat[3][3];
 
 
-void inline GetColMatCoefficients(int col_standard, float &wr, float &wb, int &black, int &white, int &max) {
-    black = 16; white = 235;
+void inline GetColMatCoefficients(int col_standard, int color_range, float &wr, float &wb, int &black, int &white, int &max) {
+    // Set black and white based on color_range
+    // AVCOL_RANGE_MPEG (1) = Studio/TV range: 16-235 for 8-bit
+    // AVCOL_RANGE_JPEG (2) = Full/PC range: 0-255 for 8-bit
+    // AVCOL_RANGE_UNSPECIFIED (0) = Not specified, default to studio range
+    // This matches CUDA's behavior: only use full range when explicitly specified
+    
+    if (color_range == 2) {  // AVCOL_RANGE_JPEG (full range) - explicit
+        black = 0;
+        white = 255;
+    } else {  // AVCOL_RANGE_MPEG (1) or AVCOL_RANGE_UNSPECIFIED (0) - default to studio
+        black = 16;
+        white = 235;
+    }
     max = 255;
 
     switch (col_standard)
@@ -66,17 +78,23 @@ void inline GetColMatCoefficients(int col_standard, float &wr, float &wb, int &b
     case ColorSpaceStandard_BT2020:
     case ColorSpaceStandard_BT2020C:
         wr = 0.2627f; wb = 0.0593f;
-        // 10-bit only
-        black = 64 << 6; white = 940 << 6;
+        // 10-bit only - adjust for color range
+        if (color_range == 2) {  // AVCOL_RANGE_JPEG (full range)
+            black = 0;
+            white = (1 << 16) - 1;
+        } else {  // AVCOL_RANGE_MPEG (studio range)
+            black = 64 << 6;
+            white = 940 << 6;
+        }
         max = (1 << 16) - 1;
         break;
     }
 }
 
-void SetMatYuv2Rgb(int col_standard) {
+void SetMatYuv2Rgb(int col_standard, int color_range) {
     float wr, wb;
     int black, white, max;
-    GetColMatCoefficients(col_standard, wr, wb, black, white, max);
+    GetColMatCoefficients(col_standard, color_range, wr, wb, black, white, max);
     float mat[3][3] = {
         1.0f, 0.0f, (1.0f - wr) / 0.5f,
         1.0f, -wb * (1.0f - wb) / 0.5f / (1 - wb - wr), -wr * (1 - wr) / 0.5f / (1 - wb - wr),
@@ -90,10 +108,10 @@ void SetMatYuv2Rgb(int col_standard) {
     HIP_API_CALL(hipMemcpyToSymbol(yuv_to_rgb_mat, mat, sizeof(mat)));
 }
 
-void SetMatRgb2Yuv(int col_standard) {
+void SetMatRgb2Yuv(int col_standard, int color_range) {
     float wr, wb;
     int black, white, max;
-    GetColMatCoefficients(col_standard, wr, wb, black, white, max);
+    GetColMatCoefficients(col_standard, color_range, wr, wb, black, white, max);
     float mat[3][3] = {
         wr, 1.0f - wb - wr, wb,
         -0.5f * wr / (1.0f - wb), -0.5f * (1 - wb - wr) / (1.0f - wb), 0.5f,
@@ -295,186 +313,186 @@ __global__ static void Yuv444ToRgbPlanarKernel(uint8_t *dp_yuv, int yuv_pitch, u
 }
 
 template <class COLOR32>
-void Nv12ToColor32(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void Nv12ToColor32(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     YuvToRgbaKernel<uchar2, COLOR32, uint2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_nv12, nv12_pitch, dp_bgra, bgra_pitch, width, height, v_pitch);
 }
 
 template <class COLOR64>
-void Nv12ToColor64(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void Nv12ToColor64(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     YuvToRgbaKernel<uchar2, COLOR64, ulonglong2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_nv12, nv12_pitch, dp_bgra, bgra_pitch, width, height, v_pitch);
 }
 
 template <class COLOR32>
-void YUV444ToColor32(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void YUV444ToColor32(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     Yuv444ToRgbaKernel<uchar2, COLOR32, uint2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_yuv_444, pitch, dp_bgra, bgra_pitch, width, height, v_pitch);
 }
 
 template <class COLOR64>
-void YUV444ToColor64(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void YUV444ToColor64(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     Yuv444ToRgbaKernel<uchar2, COLOR64, ulonglong2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_yuv_444, pitch, dp_bgra, bgra_pitch, width, height, v_pitch);
 }
 
 template <class COLOR32>
-void P016ToColor32(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void P016ToColor32(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     YuvToRgbaKernel<ushort2, COLOR32, uint2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_p016, p016_pitch, dp_bgra, bgra_pitch, width, height, v_pitch);
 }
 
 template <class COLOR64>
-void P016ToColor64(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void P016ToColor64(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     YuvToRgbaKernel<ushort2, COLOR64, ulonglong2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_p016, p016_pitch, dp_bgra, bgra_pitch, width, height, v_pitch);
 }
 
 template <class COLOR32>
-void YUV444P16ToColor32(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void YUV444P16ToColor32(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     Yuv444ToRgbaKernel<ushort2, COLOR32, uint2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_yuv_444, pitch, dp_bgra, bgra_pitch, width, height, v_pitch);
 }
 
 template <class COLOR64>
-void YUV444P16ToColor64(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void YUV444P16ToColor64(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     Yuv444ToRgbaKernel<ushort2, COLOR64, ulonglong2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_yuv_444, pitch, dp_bgra, bgra_pitch, width, height, v_pitch);
 }
 
 template <class COLOR32>
-void Nv12ToColorPlanar(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void Nv12ToColorPlanar(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     YuvToRgbPlanarKernel<uchar2, COLOR32, uchar2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_nv12, nv12_pitch, dp_bgrp, nBgrpPitch, width, height, v_pitch);
 }
 
 template <class COLOR32>
-void P016ToColorPlanar(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void P016ToColorPlanar(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     YuvToRgbPlanarKernel<ushort2, COLOR32, uchar2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_p016, p016_pitch, dp_bgrp, nBgrpPitch, width, height, v_pitch);
 }
 
 template <class COLOR32>
-void YUV444ToColorPlanar(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void YUV444ToColorPlanar(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     Yuv444ToRgbPlanarKernel<uchar2, COLOR32, uchar2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_yuv_444, pitch, dp_bgrp, nBgrpPitch, width, height, v_pitch);
 }
 
 template <class COLOR32>
-void YUV444P16ToColorPlanar(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void YUV444P16ToColorPlanar(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     Yuv444ToRgbPlanarKernel<ushort2, COLOR32, uchar2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_yuv_444, pitch, dp_bgrp, nBgrpPitch, width, height, v_pitch);
 }
 
 // Explicit Instantiation: for RGB32/BGR32 and RGB64/BGR64 formats
-template void Nv12ToColor32<BGRA32>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void Nv12ToColor32<RGBA32>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void Nv12ToColor64<BGRA64>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void Nv12ToColor64<RGBA64>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444ToColor32<BGRA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444ToColor32<RGBA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444ToColor64<BGRA64>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444ToColor64<RGBA64>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void P016ToColor32<BGRA32>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void P016ToColor32<RGBA32>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void P016ToColor64<BGRA64>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void P016ToColor64<RGBA64>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444P16ToColor32<BGRA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444P16ToColor32<RGBA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444P16ToColor64<BGRA64>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444P16ToColor64<RGBA64>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void Nv12ToColorPlanar<BGRA32>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void Nv12ToColorPlanar<RGBA32>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void P016ToColorPlanar<BGRA32>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void P016ToColorPlanar<RGBA32>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444ToColorPlanar<BGRA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444ToColorPlanar<RGBA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444P16ToColorPlanar<BGRA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444P16ToColorPlanar<RGBA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
+template void Nv12ToColor32<BGRA32>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void Nv12ToColor32<RGBA32>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void Nv12ToColor64<BGRA64>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void Nv12ToColor64<RGBA64>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444ToColor32<BGRA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444ToColor32<RGBA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444ToColor64<BGRA64>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444ToColor64<RGBA64>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void P016ToColor32<BGRA32>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void P016ToColor32<RGBA32>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void P016ToColor64<BGRA64>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void P016ToColor64<RGBA64>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444P16ToColor32<BGRA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444P16ToColor32<RGBA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444P16ToColor64<BGRA64>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444P16ToColor64<RGBA64>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void Nv12ToColorPlanar<BGRA32>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void Nv12ToColorPlanar<RGBA32>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void P016ToColorPlanar<BGRA32>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void P016ToColorPlanar<RGBA32>(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444ToColorPlanar<BGRA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444ToColorPlanar<RGBA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444P16ToColorPlanar<BGRA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444P16ToColorPlanar<RGBA32>(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgrp, int nBgrpPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
 
 template <class COLOR24>
-void Nv12ToColor24(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void Nv12ToColor24(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     YuvToRgbKernel<uchar2, COLOR24, uchar4, uchar2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_nv12, nv12_pitch, dp_bgr, bgr_pitch, width, height, v_pitch);
 }
 
 template <class COLOR48>
-void Nv12ToColor48(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void Nv12ToColor48(uint8_t *dp_nv12, int nv12_pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     YuvToRgbKernel<uchar2, COLOR48, ushort4, ushort2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_nv12, nv12_pitch, dp_bgr, bgr_pitch, width, height, v_pitch);
 }
 
 template <class COLOR24>
-void YUV444ToColor24(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void YUV444ToColor24(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     Yuv444ToRgbKernel<uchar2, COLOR24, uchar4, uchar2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_yuv_444, pitch, dp_bgr, bgr_pitch, width, height, v_pitch);
 }
 
 template <class COLOR48>
-void YUV444ToColor48(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void YUV444ToColor48(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     Yuv444ToRgbKernel<uchar2, COLOR48, ushort4, ushort2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_yuv_444, pitch, dp_bgr, bgr_pitch, width, height, v_pitch);
 }
 
 template <class COLOR24>
-void P016ToColor24(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void P016ToColor24(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     YuvToRgbKernel<ushort2, COLOR24, uchar4, uchar2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_p016, p016_pitch, dp_bgr, bgr_pitch, width, height, v_pitch);
 }
 
 template <class COLOR48>
-void P016ToColor48(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void P016ToColor48(uint8_t *dp_p016, int p016_pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     YuvToRgbKernel<ushort2, COLOR48, ushort4, ushort2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_p016, p016_pitch, dp_bgr, bgr_pitch, width, height, v_pitch);
 }
 
 template <class COLOR24>
-void YUV444P16ToColor24(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void YUV444P16ToColor24(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgra, int bgra_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     Yuv444ToRgbKernel<ushort2, COLOR24, uchar4, uchar2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_yuv_444, pitch, dp_bgra, bgra_pitch, width, height, v_pitch);
 }
 
 template <class COLOR48>
-void YUV444P16ToColor48(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream) {
-    SetMatYuv2Rgb(col_standard);
+void YUV444P16ToColor48(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgr, int bgr_pitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatYuv2Rgb(col_standard, color_range);
     Yuv444ToRgbKernel<ushort2, COLOR48, ushort4, ushort2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_yuv_444, pitch, dp_bgr, bgr_pitch, width, height, v_pitch);
@@ -482,22 +500,22 @@ void YUV444P16ToColor48(uint8_t *dp_yuv_444, int pitch, uint8_t *dp_bgr, int bgr
 
 
 // Explicit Instantiation: for RGB24/BGR24 and RGB48/BGR48 formats
-template void Nv12ToColor24<BGR24>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void Nv12ToColor24<RGB24>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void Nv12ToColor48<BGR48>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void Nv12ToColor48<RGB48>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444ToColor24<BGR24>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444ToColor24<RGB24>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444ToColor48<BGR48>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444ToColor48<RGB48>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void P016ToColor24<BGR24>(uint8_t *dp_p016, int p016_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void P016ToColor24<RGB24>(uint8_t *dp_p016, int p016_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void P016ToColor48<BGR48>(uint8_t *dp_p016, int p016_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void P016ToColor48<RGB48>(uint8_t *dp_p016, int p016_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444P16ToColor24<BGR24>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444P16ToColor24<RGB24>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444P16ToColor48<BGR48>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
-template void YUV444P16ToColor48<RGB48>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, hipStream_t hip_stream);
+template void Nv12ToColor24<BGR24>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void Nv12ToColor24<RGB24>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void Nv12ToColor48<BGR48>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void Nv12ToColor48<RGB48>(uint8_t *dp_nv12, int nv12_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444ToColor24<BGR24>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444ToColor24<RGB24>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444ToColor48<BGR48>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444ToColor48<RGB48>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void P016ToColor24<BGR24>(uint8_t *dp_p016, int p016_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void P016ToColor24<RGB24>(uint8_t *dp_p016, int p016_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void P016ToColor48<BGR48>(uint8_t *dp_p016, int p016_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void P016ToColor48<RGB48>(uint8_t *dp_p016, int p016_pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444P16ToColor24<BGR24>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444P16ToColor24<RGB24>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444P16ToColor48<BGR48>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
+template void YUV444P16ToColor48<RGB48>(uint8_t *dp_yuv_444, int pitch, uint8_t *p_bgr, int p_bgrPitch, int width, int height, int v_pitch, int col_standard, int color_range, hipStream_t hip_stream);
 
 
 template<class YuvUnit, class RgbUnit>
@@ -551,8 +569,8 @@ __global__ static void RgbaToYuvKernel(uint8_t *dp_rgb, int rgba_pitch, uint8_t 
     };
 }
 
-void Bgra64ToP016(uint8_t *dp_bgra, int bgra_pitch, uint8_t *dp_p016, int p016_pitch, int width, int height, int col_standard, hipStream_t hip_stream) {
-    SetMatRgb2Yuv(col_standard);
+void Bgra64ToP016(uint8_t *dp_bgra, int bgra_pitch, uint8_t *dp_p016, int p016_pitch, int width, int height, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatRgb2Yuv(col_standard, color_range);
     RgbaToYuvKernel<ushort2, BGRA64, ulonglong2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (dp_bgra, bgra_pitch, dp_p016, p016_pitch, width, height);
@@ -597,8 +615,8 @@ __global__ static void RgbToYuvKernel(uint8_t *dp_rgb, int rgb_pitch, uint8_t *d
     };
 }
 
-void Bgr48ToP016(uint8_t *p_bgr, int bgr_pitch, uint8_t *dp_p016, int p016_pitch, int width, int height, int col_standard, hipStream_t hip_stream) {
-    SetMatRgb2Yuv(col_standard);
+void Bgr48ToP016(uint8_t *p_bgr, int bgr_pitch, uint8_t *dp_p016, int p016_pitch, int width, int height, int col_standard, int color_range, hipStream_t hip_stream) {
+    SetMatRgb2Yuv(col_standard, color_range);
     RgbToYuvKernel<ushort2, BGR48, ushort4, ushort2>
         <<<dim3((width + 63) / 32 / 2, (height + 3) / 2 / 2), dim3(32, 2), 0, hip_stream>>>
         (p_bgr, bgr_pitch, dp_p016, p016_pitch, width, height);

@@ -28,6 +28,13 @@ def needs_cuda(test_item):
     return pytest.mark.needs_cuda(test_item)
 
 
+# Decorator for skipping ROCm tests when ROCm isn't available. The tests are
+# effectively marked to be skipped in pytest_collection_modifyitems() of
+# conftest.py
+def needs_rocm(test_item):
+    return pytest.mark.needs_rocm(test_item)
+
+
 # Decorator for skipping ffmpeg tests when ffmpeg cli isn't available. The tests are
 # effectively marked to be skipped in pytest_collection_modifyitems() of
 # conftest.py
@@ -58,6 +65,10 @@ def cuda_devices():
         pytest.param("cuda", marks=pytest.mark.needs_cuda),
         pytest.param(_CUDA_BETA_DEVICE_STR, marks=pytest.mark.needs_cuda),
     )
+
+
+def rocm_devices():
+    return (pytest.param("cuda", marks=pytest.mark.needs_rocm),)
 
 
 def unsplit_device_str(device_str: str) -> str:
@@ -149,7 +160,15 @@ def psnr(a, b, max_val=255) -> float:
 def assert_frames_equal(*args, **kwargs):
     if sys.platform == "linux" and "x86" in platform.machine().lower():
         if args[0].device.type == "cuda":
-            atol = 3 if cuda_version_used_for_building_torch() >= (13, 0) else 2
+            # Handle both CUDA and ROCm (ROCm reports device type as "cuda" but has no CUDA version)
+            cuda_version = cuda_version_used_for_building_torch()
+            if cuda_version is None:
+                # ROCm build - use atol=3
+                atol = 3
+            else:
+                # CUDA build
+                atol = 3 if cuda_version >= (13, 0) else 2
+            
             if get_ffmpeg_major_version() == 4:
                 assert_tensor_close_on_at_least(
                     args[0], args[1], percentage=95, atol=atol

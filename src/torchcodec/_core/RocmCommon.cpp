@@ -39,24 +39,33 @@ torch::Tensor convertNV12FrameToRGB(
     hipStream_t hipStream,
     std::optional<torch::Tensor> preAllocatedOutputTensor) {
   auto frameDims = FrameDims(avFrame->height, avFrame->width);
+  
+  // Check bit depth first to allocate the correct tensor type
+  bool is8bit = (avFrame->format == AV_PIX_FMT_NV12);
+  bool is10bit = (avFrame->format == AV_PIX_FMT_P010LE || avFrame->format == AV_PIX_FMT_P010BE ||
+                  avFrame->format == AV_PIX_FMT_P016LE || avFrame->format == AV_PIX_FMT_P016BE);
+  
+  TORCH_CHECK(
+      is8bit || is10bit,
+      "convertNV12FrameToRGB expects NV12, P010, or P016 format, but got format: ",
+      av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame->format)) ? 
+          av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame->format)) : "unknown",
+      " (format code: ", avFrame->format, ")");
+  
   torch::Tensor dst;
   if (preAllocatedOutputTensor.has_value()) {
     dst = preAllocatedOutputTensor.value();
   } else {
-    dst = allocateEmptyHWCTensor(frameDims, device);
+    // Allocate uint8 tensor for 8-bit, uint16 tensor for 10-bit
+    if (is8bit) {
+      dst = allocateEmptyHWCTensor(frameDims, device);  // uint8
+    } else {
+      // Allocate uint16 tensor for 10-bit video (RGB48)
+      dst = torch::empty(
+          {frameDims.height, frameDims.width, 3},
+          torch::TensorOptions().dtype(torch::kUInt16).device(device));
+    }
   }
-
-  // Verify the frame is in NV12 format (semi-planar YUV420)
-  // rocDecode outputs frames in NV12 format directly.
-  // Unlike CUDA, ROCm doesn't use FFmpeg's hardware frames context,
-  // so we check avFrame->format directly.
-  TORCH_CHECK(
-      avFrame->format == AV_PIX_FMT_NV12,
-      "convertNV12FrameToRGB expects NV12 format, but got format: ",
-      av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame->format)) ? 
-          av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame->format)) : "unknown",
-      " (format code: ", avFrame->format, "). ",
-      "Frames should be converted to NV12 before calling this function.");
 
   // We need to make sure rocDecode has finished decoding a frame before
   // color-converting it with HIP kernels.
@@ -94,22 +103,47 @@ torch::Tensor convertNV12FrameToRGB(
       "hipStreamGetFlags failed: ",
       hipGetErrorString(err));
 
-  // NV12 format: Y plane followed by interleaved UV plane
+  // NV12/P010 format: Y plane followed by interleaved UV plane
   uint8_t* yuvData[2] = {avFrame->data[0], avFrame->data[1]};
   
-  // Convert NV12 to RGB using HIP kernel
-  // NV12 is semi-planar: Y plane (luma) + interleaved UV plane (chroma)
-  // Use RGB24 (3 bytes per pixel) to match the 3-channel tensor
-  Nv12ToColor24<RGB24>(
-      yuvData[0],                                  // Y plane
-      avFrame->linesize[0],                        // Y plane stride (pitch)
-      static_cast<uint8_t*>(dst.data_ptr()),       // RGB output
-      dst.stride(0),                               // RGB stride in bytes (for uint8, stride is already in bytes)
-      frameDims.width,                             // Width
-      frameDims.height,                            // Height
-      frameDims.height,                            // v_pitch: number of Y rows (NOT UV stride!)
-      avFrame->colorspace,                         // Color space (BT.601/BT.709/etc)
-      rppStream);                                  // HIP stream
+  // Convert to RGB using appropriate HIP kernel based on bit depth
+  // NV12 is semi-planar 8-bit: Y plane (luma) + interleaved UV plane (chroma)
+  // P010 is semi-planar 10-bit stored as 16-bit (right-aligned): Y plane + interleaved UV plane
+  if (is8bit) {
+    // 8-bit: Use Nv12ToColor24 (NV12 → RGB24, uint8)
+    // bytesPerPixel = 1 for uint8
+    Nv12ToColor24<RGB24>(
+        yuvData[0],                                  // Y plane
+        avFrame->linesize[0],                        // Y plane stride (pitch in bytes)
+        static_cast<uint8_t*>(dst.data_ptr()),       // RGB output (uint8)
+        dst.stride(0),                               // RGB stride in bytes (width * 3 * 1)
+        frameDims.width,                             // Width
+        frameDims.height,                            // Height
+        frameDims.height,                            // v_pitch: number of Y rows
+        avFrame->colorspace,                         // Color space (BT.601/BT.709/etc)
+        avFrame->color_range,                        // Color range (studio/full)
+        rppStream);                                  // HIP stream
+  } else {
+    // 10-bit: Use P016ToColor48 (P016 → RGB48, uint16)
+    // This preserves 10-bit precision in 16-bit RGB output
+    // rocDecode outputs P016 format (10-bit stored in 16-bit per component)
+    // P016ToColor48 kernel converts directly to RGB48 (uint16 output)
+    // bytesPerPixel = 2 for uint16
+    // dst.stride(0) is in elements for uint16 tensor, need to multiply by 2 for bytes
+    int rgbPitchInBytes = dst.stride(0) * 2;  // Convert element stride to byte stride
+    
+    P016ToColor48<RGB48>(
+        yuvData[0],                                  // Y plane (16-bit per pixel, P016 format)
+        avFrame->linesize[0],                        // Y plane stride (pitch in bytes)
+        static_cast<uint8_t*>(dst.data_ptr()),       // RGB output (uint16 cast to uint8*)
+        rgbPitchInBytes,                             // RGB stride in bytes (width * 3 * 2)
+        frameDims.width,                             // Width
+        frameDims.height,                            // Height
+        frameDims.height,                            // v_pitch: number of Y rows
+        avFrame->colorspace,                         // Color space
+        avFrame->color_range,                        // Color range (studio/full)
+        rppStream);                                  // HIP stream
+  }
   
   return dst;
 }

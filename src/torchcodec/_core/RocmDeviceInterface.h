@@ -107,6 +107,9 @@ class RocmDeviceInterface : public DeviceInterface {
   std::unique_ptr<DeviceInterface> cpuFallback_;
   bool rocDecodeAvailable_ = false;
   
+  // Store codec context for fallback color range info
+  SharedAVCodecContext codecContext_;
+  
   // Software scaling context for format conversion (fallback)
   UniqueSwsContext swsContext_;
   SwsFrameContext prevSwsFrameContext_;
