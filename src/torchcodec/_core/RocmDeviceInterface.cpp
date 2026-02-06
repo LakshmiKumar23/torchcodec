@@ -59,7 +59,17 @@ static UniqueRocDecDecoder createDecoder(RocdecVideoFormat* videoFormat) {
   RocDecoderCreateInfo decoderParams = {};
   decoderParams.bit_depth_minus_8 = videoFormat->bit_depth_luma_minus8;
   decoderParams.chroma_format = videoFormat->chroma_format;
-  decoderParams.output_format = rocDecVideoSurfaceFormat_NV12;
+  
+  // Choose output format based on bit depth
+  // For 10-bit videos, use P016 (16-bit semi-planar)
+  // For 8-bit videos, use NV12 (8-bit semi-planar)
+  if (videoFormat->bit_depth_luma_minus8 > 0) {
+    // 10-bit or higher: use P016 format
+    decoderParams.output_format = rocDecVideoSurfaceFormat_P016;
+  } else {
+    // 8-bit: use NV12 format
+    decoderParams.output_format = rocDecVideoSurfaceFormat_NV12;
+  }
   decoderParams.codec_type = videoFormat->codec;
   decoderParams.height = videoFormat->coded_height;
   decoderParams.width = videoFormat->coded_width;
@@ -159,10 +169,18 @@ bool nativeRocDecodeSupport(const SharedAVCodecContext& codecContext) {
     return false;
   }
 
-  // Check if NV12 output is supported
+  // Check if NV12 (8-bit) or P016 (10-bit) output is supported
   bool supportsNV12Output =
       (caps.output_format_mask >> rocDecVideoSurfaceFormat_NV12) & 1;
-  if (!supportsNV12Output) {
+  bool supportsP016Output =
+      (caps.output_format_mask >> rocDecVideoSurfaceFormat_P016) & 1;
+  
+  // For 10-bit videos, we need P016 support
+  if (desc->comp[0].depth > 8 && !supportsP016Output) {
+    return false;
+  }
+  // For 8-bit videos, we need NV12 support
+  if (desc->comp[0].depth == 8 && !supportsNV12Output) {
     return false;
   }
 
@@ -245,6 +263,9 @@ void RocmDeviceInterface::initialize(
     const AVStream* avStream,
     const UniqueDecodingAVFormatContext& avFormatCtx,
     [[maybe_unused]] const SharedAVCodecContext& codecContext) {
+  // Store codec context for fallback color range info
+  codecContext_ = codecContext;
+  
   if (!rocDecodeAvailable_ || !nativeRocDecodeSupport(codecContext)) {
     cpuFallback_ = createDeviceInterface(torch::kCPU);
     TORCH_CHECK(
@@ -519,7 +540,17 @@ UniqueAVFrame RocmDeviceInterface::convertRocmFrameToAVFrame(
 
   avFrame->width = width;
   avFrame->height = height;
-  avFrame->format = AV_PIX_FMT_NV12;  // rocDecode outputs NV12 format
+  
+  // Set pixel format based on decoder output format
+  if (videoFormat_.bit_depth_luma_minus8 > 0) {
+    // 10-bit: P016LE (16-bit per component, little-endian)
+    // rocDecode outputs P016 format for 10-bit videos
+    avFrame->format = AV_PIX_FMT_P016LE;
+  } else {
+    // 8-bit: NV12
+    avFrame->format = AV_PIX_FMT_NV12;
+  }
+  
   avFrame->pts = dispInfo.pts;
 
   setDuration(avFrame, computeSafeDuration(frameRateAvgFromFFmpeg_, timeBase_));
@@ -537,17 +568,34 @@ UniqueAVFrame RocmDeviceInterface::convertRocmFrameToAVFrame(
       break;
   }
 
-  avFrame->color_range =
-      videoFormat_.video_signal_description.video_full_range_flag
-      ? AVCOL_RANGE_JPEG
-      : AVCOL_RANGE_MPEG;
+  // Set color range from rocDecode's parsed VUI parameters
+  // If rocDecode explicitly indicates full range, trust it
+  // Otherwise, fall back to container-level metadata from FFmpeg codec context
+  // because rocDecode might not have parsed VUI parameters (video_full_range_flag=0 by default)
+  
+  if (videoFormat_.video_signal_description.video_full_range_flag) {
+    // rocDecode explicitly parsed full range from VUI - trust it
+    avFrame->color_range = AVCOL_RANGE_JPEG;  // Full range (0-255)
+  } else if (codecContext_) {
+    // rocDecode didn't indicate full range - could be:
+    // 1. VUI absent from bitstream, OR
+    // 2. VUI present but video_signal_type_present_flag=0, OR  
+    // 3. VUI present and explicitly indicates studio range
+    // Fall back to container-level metadata which FFmpeg parses reliably
+    avFrame->color_range = codecContext_->color_range;
+  } else {
+    // No codec context available (shouldn't happen) - default to studio
+    avFrame->color_range = AVCOL_RANGE_MPEG;  // Studio range (16-235)
+  }
 
   // CRITICAL: We must copy the frame data from rocDecode's internal buffer
   // because rocDecode will reuse/free this buffer for the next frame.
   // The AVFrame will be used later in Python and must own its memory.
   
-  // For NV12: pitch is the stride/alignment, width is the actual image width
+  // For NV12: pitch is the stride/alignment, width is the actual image width (1 byte per pixel)
+  // For P016: pitch is the stride/alignment, width is the actual image width (2 bytes per pixel)
   // We need to allocate based on pitch to maintain alignment
+  int bytesPerPixel = (videoFormat_.bit_depth_luma_minus8 > 0) ? 2 : 1;
   int ySize = pitch * height;
   int uvSize = pitch * (height / 2);  // UV plane also uses pitch
   size_t totalSize = static_cast<size_t>(ySize + uvSize);
@@ -562,13 +610,13 @@ UniqueAVFrame RocmDeviceInterface::convertRocmFrameToAVFrame(
   TORCH_CHECK(framePtr[0] != nullptr, "rocDecode returned null Y plane pointer");
   TORCH_CHECK(framePtr[1] != nullptr, "rocDecode returned null UV plane pointer");
 
-  // Copy Y plane asynchronously - use pitch for both src and dst stride
+  // Copy Y plane asynchronously
   err = hipMemcpy2DAsync(
       hipBuffer,                                    // dst
-      pitch,                                        // dst pitch (use same pitch)
-      reinterpret_cast<uint8_t*>(framePtr[0]),     // src - Y plane pointer
+      pitch,                                        // dst pitch
+      reinterpret_cast<uint8_t*>(framePtr[0]),     // src - Y plane
       pitch,                                        // src pitch
-      width,                                        // width in bytes (actual data width)
+      width * bytesPerPixel,                        // width in bytes
       height,                                       // height in rows
       hipMemcpyDeviceToDevice,
       copyStream_);
@@ -577,13 +625,13 @@ UniqueAVFrame RocmDeviceInterface::convertRocmFrameToAVFrame(
       "Failed to copy Y plane: ",
       hipGetErrorString(err));
 
-  // Copy UV plane asynchronously - framePtr[1] already points to UV plane, no offset needed!
+  // Copy UV plane asynchronously
   err = hipMemcpy2DAsync(
       hipBuffer + ySize,                           // dst
-      pitch,                                        // dst pitch (use same pitch)
-      reinterpret_cast<uint8_t*>(framePtr[1]),     // src - UV plane pointer (already correct!)
+      pitch,                                        // dst pitch
+      reinterpret_cast<uint8_t*>(framePtr[1]),     // src - UV plane
       pitch,                                        // src pitch
-      width,                                        // width in bytes (actual data width)
+      width * bytesPerPixel,                        // width in bytes
       height / 2,                                   // height in rows
       hipMemcpyDeviceToDevice,
       copyStream_);
@@ -672,8 +720,12 @@ UniqueAVFrame RocmDeviceInterface::transferCpuFrameToGpuNV12(
       height);
 
   if (!swsContext_ || prevSwsFrameContext_ != swsFrameContext) {
+    // Use swsFlags=0 (point sampling) instead of SWS_BILINEAR to better match
+    // the direct CPU decoding path, which also uses swsFlags=0.
+    // This reduces color conversion differences when comparing CPU fallback against direct CPU.
+    // Note: CUDA beta uses SWS_BILINEAR, which is why it needs PSNR > 25 dB threshold.
     swsContext_ = createSwsContext(
-        swsFrameContext, cpuFrame->colorspace, AV_PIX_FMT_NV12, SWS_BILINEAR);
+        swsFrameContext, cpuFrame->colorspace, AV_PIX_FMT_NV12, 0);
     prevSwsFrameContext_ = swsFrameContext;
   }
 
@@ -759,9 +811,14 @@ void RocmDeviceInterface::convertAVFrameToFrameOutput(
   UniqueAVFrame gpuFrame =
       cpuFallback_ ? transferCpuFrameToGpuNV12(avFrame) : std::move(avFrame);
 
+  // Accept both NV12 (8-bit) and P010LE (10-bit) formats
   TORCH_CHECK(
-      gpuFrame->format == AV_PIX_FMT_NV12,
-      "Expected NV12 format frame from ROCm interface, got format: ",
+      gpuFrame->format == AV_PIX_FMT_NV12 || 
+      gpuFrame->format == AV_PIX_FMT_P010LE ||
+      gpuFrame->format == AV_PIX_FMT_P010BE ||
+      gpuFrame->format == AV_PIX_FMT_P016LE ||
+      gpuFrame->format == AV_PIX_FMT_P016BE,
+      "Expected NV12, P010, or P016 format frame from ROCm interface, got format: ",
       gpuFrame->format);
 
   validatePreAllocatedTensorShape(preAllocatedOutputTensor, gpuFrame);
