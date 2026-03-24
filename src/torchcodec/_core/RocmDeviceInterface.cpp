@@ -824,7 +824,7 @@ void RocmDeviceInterface::convertAVFrameToFrameOutput(
   validatePreAllocatedTensorShape(preAllocatedOutputTensor, gpuFrame);
 
   
-  // Lazily initialize RPP context on first use
+  // Initialize RPP context on first use
   if (!rppCtx_) {
     rppCtx_ = getRppStreamContext(device_);
   }
