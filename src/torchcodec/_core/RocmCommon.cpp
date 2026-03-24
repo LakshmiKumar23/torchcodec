@@ -8,11 +8,43 @@
 #include "Cache.h" // for PerGpuCache
 
 #include <hip/hip_runtime.h>
-#include <rpp/rpp.h>
+
+extern "C" {
+#include <libavutil/pixfmt.h>
+}
 
 namespace facebook::torchcodec {
 
 namespace {
+
+// Map FFmpeg metadata to rppt_yuv_to_rgb (RpptColorStandard / RpptColorRange in rppdefs.h).
+RpptColorStandard avColorSpaceToRppColStandard(AVColorSpace space) {
+  switch (space) {
+    case AVCOL_SPC_FCC:
+      return RpptColorStandard_FCC;
+    case AVCOL_SPC_BT470BG:
+      return RpptColorStandard_BT470BG;
+    case AVCOL_SPC_SMPTE170M:
+      return RpptColorStandard_BT601;
+    case AVCOL_SPC_SMPTE240M:
+      return RpptColorStandard_SMPTE240M;
+    case AVCOL_SPC_BT2020_NCL:
+      return RpptColorStandard_BT2020_NCL;
+    case AVCOL_SPC_BT2020_CL:
+      return RpptColorStandard_BT2020_CL;
+    case AVCOL_SPC_BT709:
+    default:
+      return RpptColorStandard_BT709;
+  }
+}
+
+// FFmpeg: JPEG = full; MPEG / unspecified = studio.
+RpptColorRange avColorRangeToRppColorRange(AVColorRange range) {
+  if (range == AVCOL_RANGE_JPEG) {
+    return RpptColorRange_FULL;
+  }
+  return RpptColorRange_STUDIO;
+}
 
 // Set to -1 to have an infinitely sized cache. Set it to 0 to disable caching.
 // Set to a positive number to have a cache of that size.
@@ -36,35 +68,30 @@ torch::Tensor convertNV12FrameToRGB(
     UniqueAVFrame& avFrame,
     const torch::Device& device,
     const UniqueRppContext& rppCtx,
-    hipStream_t hipStream,
+    hipStream_t rocdecStream,
     std::optional<torch::Tensor> preAllocatedOutputTensor) {
+
   auto frameDims = FrameDims(avFrame->height, avFrame->width);
   
-  // Check bit depth first to allocate the correct tensor type
-  bool is8bit = (avFrame->format == AV_PIX_FMT_NV12);
-  bool is10bit = (avFrame->format == AV_PIX_FMT_P010LE || avFrame->format == AV_PIX_FMT_P010BE ||
-                  avFrame->format == AV_PIX_FMT_P016LE || avFrame->format == AV_PIX_FMT_P016BE);
-  
   TORCH_CHECK(
-      is8bit || is10bit,
-      "convertNV12FrameToRGB expects NV12, P010, or P016 format, but got format: ",
-      av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame->format)) ? 
-          av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame->format)) : "unknown",
-      " (format code: ", avFrame->format, ")");
-  
+      avFrame->format == AV_PIX_FMT_NV12,
+      "convertNV12FrameToRGB on ROCm expects NV12 (AV_PIX_FMT_NV12); "
+      "rppt_yuv_to_rgb is 8-bit only. Got format: ",
+      av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame->format))
+          ? av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame->format))
+          : "unknown",
+      " (format code: ",
+      avFrame->format,
+      ")");
+
   torch::Tensor dst;
   if (preAllocatedOutputTensor.has_value()) {
     dst = preAllocatedOutputTensor.value();
+    TORCH_CHECK(
+        dst.scalar_type() == torch::kUInt8,
+        "ROCm NV12→RGB requires a uint8 HWC output tensor.");
   } else {
-    // Allocate uint8 tensor for 8-bit, uint16 tensor for 10-bit
-    if (is8bit) {
-      dst = allocateEmptyHWCTensor(frameDims, device);  // uint8
-    } else {
-      // Allocate uint16 tensor for 10-bit video (RGB48)
-      dst = torch::empty(
-          {frameDims.height, frameDims.width, 3},
-          torch::TensorOptions().dtype(torch::kUInt16).device(device));
-    }
+    dst = allocateEmptyHWCTensor(frameDims, device);
   }
 
   // We need to make sure rocDecode has finished decoding a frame before
@@ -79,7 +106,7 @@ torch::Tensor convertNV12FrameToRGB(
       "hipEventCreate failed: ",
       hipGetErrorString(err));
   
-  err = hipEventRecord(rocdecodeDoneEvent, hipStream);
+  err = hipEventRecord(rocdecodeDoneEvent, rocdecStream);
   TORCH_CHECK(
       err == hipSuccess,
       "hipEventRecord failed: ",
@@ -103,89 +130,105 @@ torch::Tensor convertNV12FrameToRGB(
       "hipStreamGetFlags failed: ",
       hipGetErrorString(err));
 
-  // NV12/P010 format: Y plane followed by interleaved UV plane
+  // NV12: Y plane then interleaved UV (device pointers from rocDecode).
   uint8_t* yuvData[2] = {avFrame->data[0], avFrame->data[1]};
-  
-  // Convert to RGB using appropriate HIP kernel based on bit depth
-  // NV12 is semi-planar 8-bit: Y plane (luma) + interleaved UV plane (chroma)
-  // P010 is semi-planar 10-bit stored as 16-bit (right-aligned): Y plane + interleaved UV plane
-  if (is8bit) {
-    // 8-bit: Use Nv12ToColor24 (NV12 → RGB24, uint8)
-    // bytesPerPixel = 1 for uint8
-    Nv12ToColor24<RGB24>(
-        yuvData[0],                                  // Y plane
-        avFrame->linesize[0],                        // Y plane stride (pitch in bytes)
-        static_cast<uint8_t*>(dst.data_ptr()),       // RGB output (uint8)
-        dst.stride(0),                               // RGB stride in bytes (width * 3 * 1)
-        frameDims.width,                             // Width
-        frameDims.height,                            // Height
-        frameDims.height,                            // v_pitch: number of Y rows
-        avFrame->colorspace,                         // Color space (BT.601/BT.709/etc)
-        avFrame->color_range,                        // Color range (studio/full)
-        rppStream);                                  // HIP stream
-  } else {
-    // 10-bit: Use P016ToColor48 (P016 → RGB48, uint16)
-    // This preserves 10-bit precision in 16-bit RGB output
-    // rocDecode outputs P016 format (10-bit stored in 16-bit per component)
-    // P016ToColor48 kernel converts directly to RGB48 (uint16 output)
-    // bytesPerPixel = 2 for uint16
-    // dst.stride(0) is in elements for uint16 tensor, need to multiply by 2 for bytes
-    int rgbPitchInBytes = dst.stride(0) * 2;  // Convert element stride to byte stride
-    
-    P016ToColor48<RGB48>(
-        yuvData[0],                                  // Y plane (16-bit per pixel, P016 format)
-        avFrame->linesize[0],                        // Y plane stride (pitch in bytes)
-        static_cast<uint8_t*>(dst.data_ptr()),       // RGB output (uint16 cast to uint8*)
-        rgbPitchInBytes,                             // RGB stride in bytes (width * 3 * 2)
-        frameDims.width,                             // Width
-        frameDims.height,                            // Height
-        frameDims.height,                            // v_pitch: number of Y rows
-        avFrame->colorspace,                         // Color space
-        avFrame->color_range,                        // Color range (studio/full)
-        rppStream);                                  // HIP stream
-  }
-  
+
+  rppStatus_t setStreamStatus =
+      rppSetStream(rppCtx->handle, rppCtx->stream);
+  TORCH_CHECK(
+      setStreamStatus == rppStatusSuccess,
+      "rppSetStream failed. Status: ",
+      setStreamStatus);
+
+  RpptDesc srcDesc{};
+  srcDesc.numDims = 4;
+  srcDesc.offsetInBytes = 0;
+  srcDesc.dataType = RpptDataType::U8;
+  srcDesc.n = 1;
+  srcDesc.c = 1;
+  srcDesc.h = static_cast<Rpp32u>(frameDims.height);
+  srcDesc.w = static_cast<Rpp32u>(frameDims.width);
+  srcDesc.layout = RpptLayout::NHWC;
+  srcDesc.strides.nStride = srcDesc.c * srcDesc.w * srcDesc.h;
+  srcDesc.strides.hStride = srcDesc.c * srcDesc.w;
+  srcDesc.strides.wStride = srcDesc.c;
+  srcDesc.strides.cStride = 1;
+
+  const Rpp32u rgbRowBytes =
+      static_cast<Rpp32u>(dst.stride(0)) * static_cast<Rpp32u>(dst.element_size());
+  RpptDesc dstDesc{};
+  dstDesc.numDims = 4;
+  dstDesc.offsetInBytes = 0;
+  dstDesc.dataType = RpptDataType::U8;
+  dstDesc.n = 1;
+  dstDesc.c = 3;
+  dstDesc.h = static_cast<Rpp32u>(frameDims.height);
+  dstDesc.w = static_cast<Rpp32u>(frameDims.width);
+  dstDesc.layout = RpptLayout::NHWC;
+  dstDesc.strides.nStride = rgbRowBytes * dstDesc.h;
+  dstDesc.strides.hStride = rgbRowBytes;
+  dstDesc.strides.wStride = 3;
+  dstDesc.strides.cStride = 1;
+
+  const RpptColorStandard colStandard =
+      avColorSpaceToRppColStandard(static_cast<AVColorSpace>(avFrame->colorspace));
+  const RpptColorRange colorRange =
+      avColorRangeToRppColorRange(static_cast<AVColorRange>(avFrame->color_range));
+
+  RppStatus status = rppt_yuv_to_rgb(
+      yuvData[0],
+      yuvData[1],
+      &srcDesc,
+      static_cast<uint8_t*>(dst.data_ptr()),
+      &dstDesc,
+      static_cast<Rpp32u>(avFrame->linesize[0]),
+      static_cast<Rpp32u>(avFrame->linesize[1]),
+      rgbRowBytes,
+      static_cast<Rpp32u>(frameDims.width),
+      static_cast<Rpp32u>(frameDims.height),
+      colStandard,
+      colorRange,
+      rppCtx->handle,
+      RPP_HIP_BACKEND);
+  TORCH_CHECK(
+      status == RPP_SUCCESS,
+      "Failed to convert NV12 to RGB. Status: ",
+      status);
   return dst;
 }
 
 UniqueRppContext getRppStreamContext(const torch::Device& device) {
-  int deviceIndex = getDeviceIndex(device);
+  [[maybe_unused]] int deviceIndex = getDeviceIndex(device);
 
   UniqueRppContext rppCtx = g_cached_rpp_ctxs.get(device);
   if (rppCtx) {
-    // Clear any prior HIP errors before reusing cached context
-    hipError_t priorErr = hipGetLastError();
-    
-    // Synchronize the RPP stream to ensure it's in a clean state
-    hipError_t syncErr = hipStreamSynchronize(rppCtx->stream);
-    if (syncErr != hipSuccess) {
-      // Don't use this corrupted context, create a new one
-      rppCtx.reset();
-    } else {
-      return rppCtx;
-    }
+    return rppCtx;
   }
 
   // Create a new RPP context manually with custom deleter
   RppContext* ctx = new RppContext();
-  
-  // Initialize RPP handle
-  rppStatus_t status = rppCreate(&ctx->handle, 1);  // batch size = 1
-  TORCH_CHECK(
-      status == rppStatusSuccess,
-      "Failed to create RPP handle. Status: ",
-      status);
-  
-  // Wrap in unique_ptr with custom deleter
-  rppCtx = UniqueRppContext(ctx, RppContextDeleter());
+  ctx->stream = nullptr;
+  ctx->handle = nullptr;
+  int batchSize = 1;
 
-  // Get current HIP stream
-  hipError_t err = hipStreamCreate(&rppCtx->stream);
+  hipError_t err = hipStreamCreate(&ctx->stream);
   TORCH_CHECK(
       err == hipSuccess,
       "Failed to create HIP stream: ",
       hipGetErrorString(err));
 
+  rppStatus_t status = rppCreate(
+      &ctx->handle,
+      batchSize,
+      0,  // numThreads = 0 for HIP backend
+      ctx->stream,
+      RPP_HIP_BACKEND);
+  TORCH_CHECK(
+      status == rppStatusSuccess,
+      "Failed to create RPP handle. Status: ",
+      status);
+
+  rppCtx = UniqueRppContext(ctx, RppContextDeleter());
   return rppCtx;
 }
 
