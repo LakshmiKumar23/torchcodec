@@ -124,9 +124,7 @@ function(make_torchcodec_libraries
     endif()
 
     if(ENABLE_ROCM)
-        list(APPEND core_sources RocmDeviceInterface.cpp RocDecCache.cpp RocmCommon.cpp RocDecodeRuntimeLoader.cpp rocdecode_kernels/colorspace_kernels.cpp)
-        # Mark the HIP kernel file to be compiled with HIP compiler
-        set_source_files_properties(rocdecode_kernels/colorspace_kernels.cpp PROPERTIES LANGUAGE HIP)
+        list(APPEND core_sources RocmDeviceInterface.cpp RocDecCache.cpp RocmCommon.cpp RocDecodeRuntimeLoader.cpp)
     endif()
 
     set(core_library_dependencies
@@ -142,13 +140,14 @@ function(make_torchcodec_libraries
     endif()
 
     if(ENABLE_ROCM)
-        # Find HIP package for ROCm
+        # Find HIP and RPP (ROCm Performance Primitives) for ROCm
         find_package(hip REQUIRED)
+        find_package(rpp 3.1.2 REQUIRED)
         
         # Add HIP and RPP (ROCm Performance Primitives) libraries
         list(APPEND core_library_dependencies
             hip::host
-            rpp
+            rpp::rpp
         )
     endif()
 

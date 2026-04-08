@@ -23,8 +23,6 @@
 #include "FFMPEGCommon.h"
 #include "Frame.h"
 
-#include "rocdecode_kernels/colorspace_kernels.h"
-
 extern "C" {
 #include <libavutil/pixdesc.h>
 // Note: FFmpeg doesn't have native hwcontext_hip/rocm support

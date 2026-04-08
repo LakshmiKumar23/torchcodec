@@ -73,9 +73,6 @@ class RocmDeviceInterface : public DeviceInterface {
       ReferenceAVPacket& packet,
       ReferenceAVPacket& filteredPacket);
 
-  // Note: rocDecode does not require tracking mapped frames for explicit release
-  void releasePreviousFrame();
-
   UniqueAVFrame convertRocmFrameToAVFrame(
       void* framePtr[3],
       unsigned int pitch,
@@ -101,7 +98,7 @@ class RocmDeviceInterface : public DeviceInterface {
   UniqueRppContext rppCtx_;
 
   // HIP stream for async memory operations
-  hipStream_t copyStream_ = nullptr;
+  hipStream_t rocdecStream_ = nullptr;
 
   // CPU fallback for unsupported formats
   std::unique_ptr<DeviceInterface> cpuFallback_;
@@ -124,7 +121,7 @@ class RocmDeviceInterface : public DeviceInterface {
 // rocDecode SDK (https://github.com/ROCm/rocDecode), which provides access to
 // AMD's VCN (Video Core Next) hardware decoder.
 //
-// Architecture Design (parallel to NVDEC implementation):
+// Architecture Design:
 // 
 // At a high level, this decoding interface mimics the FFmpeg send/receive
 // architecture while using rocDecode for hardware acceleration:
@@ -177,7 +174,7 @@ class RocmDeviceInterface : public DeviceInterface {
 // Hardware Requirements:
 // ======================
 // - AMD GPU with gfx908 or higher (RDNA 2+, CDNA 2+)
-// - ROCm 6.3.0 or later
+// - ROCm 7.13.0 or later
 // - libva-amdgpu-dev (VA-API AMD implementation)
 // - mesa-amdgpu-va-drivers
 //
