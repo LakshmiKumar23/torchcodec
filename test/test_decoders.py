@@ -2089,33 +2089,6 @@ class TestVideoDecoder:
             rocm_frame = decoder_rocm.get_frame_at(frame_index).data.cpu()
             cpu_frame = decoder_cpu.get_frame_at(frame_index).data
 
-            # Debug: print pixel value ranges and dump to files
-            if frame_index == 0:
-                print(f"\nFrame {frame_index} pixel ranges:")
-                print(f"  ROCm: min={rocm_frame.min()}, max={rocm_frame.max()}, mean={rocm_frame.float().mean():.2f}")
-                print(f"  CPU:  min={cpu_frame.min()}, max={cpu_frame.max()}, mean={cpu_frame.float().mean():.2f}")
-                # Check a few specific pixels that should differ by ~16
-                print(f"  ROCm pixel [0,0,0]={rocm_frame[0,0,0]}, CPU pixel [0,0,0]={cpu_frame[0,0,0]}")
-                print(f"  Difference at [0,0,0]: {abs(int(rocm_frame[0,0,0]) - int(cpu_frame[0,0,0]))}")
-                
-                # Dump frames to files for inspection
-                import torch
-                torch.save(rocm_frame, "/home/lakshmi/work/lk/torchcodec/rocm_frame0.pt")
-                torch.save(cpu_frame, "/home/lakshmi/work/lk/torchcodec/cpu_frame0.pt")
-                print(f"  Saved frames to /home/lakshmi/work/lk/torchcodec/rocm_frame0.pt and /home/lakshmi/work/lk/torchcodec/cpu_frame0.pt")
-                
-                # Also save as images if possible
-                try:
-                    from torchvision.utils import save_image
-                    # Convert CHW to HWC and normalize to [0,1]
-                    rocm_img = rocm_frame.permute(1, 2, 0).float() / 255.0
-                    cpu_img = cpu_frame.permute(1, 2, 0).float() / 255.0
-                    save_image(rocm_img.permute(2, 0, 1), "/home/lakshmi/work/lk/torchcodec/rocm_frame0.png")
-                    save_image(cpu_img.permute(2, 0, 1), "/home/lakshmi/work/lk/torchcodec/cpu_frame0.png")
-                    print(f"  Saved images to /home/lakshmi/work/lk/torchcodec/rocm_frame0.png and /home/lakshmi/work/lk/torchcodec/cpu_frame0.png")
-                except ImportError:
-                    print("  (torchvision not available for image export)")
-
             # Allow standard tolerance for GPU vs CPU color conversion
             # Both full range and studio range should match closely with proper
             # color_range handling in the HIP kernels
@@ -2125,48 +2098,32 @@ class TestVideoDecoder:
     @needs_rocm
     def test_rocm_h265_10bit_hardware_support(self):
         """Test that H.265 10-bit videos are decoded by rocDecode hardware.
-        
-        Note: Unlike NVDEC (which converts 10-bit to 8-bit), rocDecode preserves
-        10-bit precision as uint16 output. This test compares ROCm's uint16 output
-        against CPU's uint8 output by extracting the high 8 bits.
-        
-        A 90% match threshold is used (vs typical 95%) because hardware and software
-        bit-depth conversion algorithms differ slightly.
+
+        Expect uint8 RGB (CHW) as expected by torchcodec. Match against the CPU
+        decoder using the same rules as other GPU decode tests.
         """
-        # rocDecode supports 10-bit for H.265, AV1, and VP9
         asset = H265_10BITS
 
         decoder_rocm = VideoDecoder(asset.path, device="cuda")
-        
-        # rocDecode should handle H.265 10-bit videos without CPU fallback
+
         assert decoder_rocm.cpu_fallback.status_known
-        assert not decoder_rocm.cpu_fallback, "H.265 10-bit should be hardware-decoded by rocDecode"
-        
+        assert not decoder_rocm.cpu_fallback, (
+            "H.265 10-bit should be hardware-decoded by rocDecode"
+        )
+
         decoder_cpu = VideoDecoder(asset.path)
 
-        frame_indices = [0, 10, 20, 5]
-        for frame_index in frame_indices:
+        for frame_index in (0, 10, 20, 5):
             frame_rocm = decoder_rocm.get_frame_at(frame_index).data
             assert frame_rocm.device.type == "cuda"
-            assert frame_rocm.dtype == torch.uint16, f"Expected uint16 for 10-bit video (preserved), got {frame_rocm.dtype}"
-            
+            assert frame_rocm.dtype == torch.uint8, (
+                f"Expected uint8 output, got {frame_rocm.dtype}"
+            )
+
             frame_cpu = decoder_cpu.get_frame_at(frame_index).data
-            assert frame_cpu.dtype == torch.uint8, f"Expected uint8 for CPU output (converted to 8-bit), got {frame_cpu.dtype}"
-            
-            # ROCm preserves 10-bit as uint16, CPU converts to uint8
-            # Convert ROCm uint16 to uint8 by extracting high 8 bits (>> 8) for comparison
-            frame_rocm_8bit = (frame_rocm.to(torch.int32) >> 8).to(torch.uint8)
-            
-            # For 10-bit videos, hardware (rocDecode) and software (FFmpeg) use different
-            # bit-depth conversion algorithms, so we use a relaxed 90% threshold (vs typical 95%)
-            # Compare on GPU to use CUDA/ROCm path in assert_tensor_close_on_at_least
-            frame_cpu_gpu = frame_cpu.to("cuda")
-            if get_ffmpeg_major_version() == 4:
-                assert_tensor_close_on_at_least(
-                    frame_rocm_8bit, frame_cpu_gpu, percentage=90, atol=3
-                )
-            else:
-                assert_frames_equal(frame_rocm_8bit, frame_cpu_gpu)
+            assert frame_cpu.dtype == torch.uint8
+
+            assert_frames_equal(frame_rocm, frame_cpu.to("cuda"))
 
     @needs_rocm
     def test_rocm_h264_10bit_cpu_fallback(self):
@@ -2234,7 +2191,7 @@ class TestVideoDecoder:
             
             frame_cpu = decoder_cpu.get_frame_at(frame_index).data
             assert frame_cpu.dtype == torch.uint8
-            
+
             # AV1 codec has significant hardware vs software implementation differences
             # Use PSNR validation to measure perceptual quality rather than exact pixel matching
             frame_psnr = psnr(frame_rocm.cpu(), frame_cpu)
@@ -2247,7 +2204,7 @@ class TestVideoDecoder:
         asset = TEST_SRC_2_720P_VP9
         
         decoder_rocm = VideoDecoder(asset.path, device="cuda")
-        
+
         # VP9 should NOT trigger CPU fallback
         assert decoder_rocm.cpu_fallback.status_known
         assert not decoder_rocm.cpu_fallback, "VP9 should be hardware-decoded by rocDecode"

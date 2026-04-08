@@ -249,7 +249,7 @@ format you want. Refer to AMD's GPU support documentation for more details.
 
    You'll need the following ROCm components installed:
    - rocDecode: AMD's video decode SDK
-   - RPP (ROCm Performance Primitives): For image processing
+   - RPP (ROCm Performance Primitives) version 3.1.2 and above: For image processing
    - HIP runtime
 
    These are typically included in the standard ROCm installation.
