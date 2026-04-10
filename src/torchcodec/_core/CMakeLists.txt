@@ -141,14 +141,19 @@ function(make_torchcodec_libraries
 
     if(ENABLE_ROCM)
         # Find HIP and RPP (ROCm Performance Primitives) for ROCm
-        find_package(hip REQUIRED)
-        find_package(rpp 3.1.2 REQUIRED)
-        
+        find_package(hip QUIET)
+        find_package(rpp 3.1.2 QUIET)
+
         # Add HIP and RPP (ROCm Performance Primitives) libraries
-        list(APPEND core_library_dependencies
-            hip::host
-            rpp::rpp
-        )
+        if(hip_FOUND AND rpp_FOUND)
+            list(APPEND core_library_dependencies
+                hip::host
+                rpp::rpp
+            )
+        else()
+            message(WARNING "HIP and RPP not found, skipping ROCm support. To enable ROCm support, please install HIP and RPP.")
+            set(ENABLE_ROCM OFF)
+        endif()
     endif()
 
     make_torchcodec_sublibrary(

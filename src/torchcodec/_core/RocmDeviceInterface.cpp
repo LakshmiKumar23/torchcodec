@@ -212,34 +212,44 @@ RocmDeviceInterface::RocmDeviceInterface(const torch::Device& device)
 }
 
 RocmDeviceInterface::~RocmDeviceInterface() {
-  try {
-    if (decoder_) {
+  if (decoder_) {
+    try {
       flush();
-
-      // Set the device before accessing cache to ensure HIP context is valid
-      hipSetDevice(device_.index());
-      RocDecCache::getCache(device_).returnDecoder(
-          &videoFormat_, std::move(decoder_));
+    } catch (const std::exception&) {
+      // Don't rethrow from destructor
     }
 
-    if (videoParser_) {
-      rocDecDestroyVideoParser(videoParser_);
-      videoParser_ = nullptr;
-    }
+    // Set the device before accessing cache to ensure HIP context is valid
+    hipError_t hipErr = hipSetDevice(static_cast<int>(device_.index()));
+    TORCH_CHECK(
+        hipErr == hipSuccess,
+        "hipSetDevice failed in ~RocmDeviceInterface (before returnDecoder): ",
+        hipGetErrorString(hipErr));
+    RocDecCache::getCache(device_).returnDecoder(
+        &videoFormat_, std::move(decoder_));
+  }
 
-    // Only return RPP context if it was initialized
-    if (rppCtx_) {
-      hipSetDevice(device_.index());
-      returnRppStreamContextToCache(device_, std::move(rppCtx_));
-    }
+  if (videoParser_) {
+    rocDecDestroyVideoParser(videoParser_);
+    videoParser_ = nullptr;
+  }
 
-    // Destroy the HIP stream
-    if (rocdecStream_) {
-      hipStreamDestroy(rocdecStream_);
-      rocdecStream_ = nullptr;
-    }
-  } catch (const std::exception& e) {
-    // Don't rethrow from destructor
+  if (rppCtx_) {
+    hipError_t hipErr = hipSetDevice(static_cast<int>(device_.index()));
+    TORCH_CHECK(
+        hipErr == hipSuccess,
+        "hipSetDevice failed in ~RocmDeviceInterface (before returnRppStreamContextToCache): ",
+        hipGetErrorString(hipErr));
+    returnRppStreamContextToCache(device_, std::move(rppCtx_));
+  }
+
+  if (rocdecStream_) {
+    hipError_t hipErr = hipStreamDestroy(rocdecStream_);
+    TORCH_CHECK(
+        hipErr == hipSuccess,
+        "hipStreamDestroy failed in ~RocmDeviceInterface: ",
+        hipGetErrorString(hipErr));
+    rocdecStream_ = nullptr;
   }
 }
 
@@ -696,7 +706,11 @@ UniqueAVFrame RocmDeviceInterface::transferCpuFrameToGpuNV12(
       nullptr,
       0,
       [](void* opaque, [[maybe_unused]] uint8_t* data) {
-        hipFree(opaque);
+        hipError_t hipErr = hipFree(opaque);
+        TORCH_CHECK(
+            hipErr == hipSuccess,
+            "hipFree failed in transferCpuFrameToGpuNV12 buffer free: ",
+            hipGetErrorString(hipErr));
       },
       hipBuffer,
       0);
