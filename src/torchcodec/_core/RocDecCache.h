@@ -14,8 +14,8 @@
 #include <torch/types.h>
 
 #include "RocDecodeRuntimeLoader.h"
-#include "rocdecode_include/rocdecode.h"
-#include "rocdecode_include/rocparser.h"
+#include <rocdecode/rocdecode.h>
+#include <rocdecode/rocparser.h>
 
 namespace facebook::torchcodec {
 

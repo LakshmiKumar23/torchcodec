@@ -19,8 +19,8 @@ bool loadRocDecodeLibrary() {
 
 #include "RocDecodeRuntimeLoader.h"
 
-#include "rocdecode_include/rocdecode.h"
-#include "rocdecode_include/rocparser.h"
+#include <rocdecode/rocdecode.h>
+#include <rocdecode/rocparser.h>
 
 #include <torch/types.h>
 #include <cstdio>

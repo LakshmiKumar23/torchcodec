@@ -58,10 +58,9 @@ print(f"{torch.cuda.get_device_properties(0)=}")
 #    </video>
 import urllib.request
 
-video_file = "video.mp4"
-urllib.request.urlretrieve(
+video_file, _ = urllib.request.urlretrieve(
     "https://download.pytorch.org/torchaudio/tutorial-assets/stream-api/NASAs_Most_Scientifically_Complex_Space_Observatory_Requires_Precision-MP4_small.mp4",
-    video_file,
+    "video.mp4",
 )
 
 

@@ -123,8 +123,52 @@ function(make_torchcodec_libraries
 	    list(APPEND core_sources CudaDeviceInterface.cpp BetaCudaDeviceInterface.cpp NVDECCache.cpp CUDACommon.cpp NVCUVIDRuntimeLoader.cpp)
     endif()
 
+    set(_torchcodec_rocm_deps_ok FALSE)
     if(ENABLE_ROCM)
-        list(APPEND core_sources RocmDeviceInterface.cpp RocDecCache.cpp RocmCommon.cpp RocDecodeRuntimeLoader.cpp)
+        # ROCm builds require HIP, RPP, and the rocDecode CMake package from the same
+        # ROCm install (https://github.com/ROCm/TheRock)
+        if(DEFINED ENV{ROCM_PATH})
+            list(APPEND CMAKE_PREFIX_PATH "$ENV{ROCM_PATH}")
+        else()
+            message(
+                WARNING
+                "ENABLE_ROCM is set but ROCM_PATH is not defined in the environment. "
+                "Set it to your ROCm install prefix (for example: export ROCM_PATH=/opt/rocm) "
+                "and reconfigure/rebuild so CMake can find HIP, RPP, and rocDecode."
+            )
+        endif()
+        find_package(hip QUIET)
+        find_package(rpp 3.1.2 QUIET)
+        find_package(rocdecode 1.8.0 CONFIG QUIET)
+        if(hip_FOUND AND rpp_FOUND AND rocdecode_FOUND)
+            set(_torchcodec_rocm_deps_ok TRUE)
+        else()
+            set(_missing_rocm_deps "")
+            if(NOT hip_FOUND)
+                list(APPEND _missing_rocm_deps "HIP")
+            endif()
+            if(NOT rpp_FOUND)
+                list(APPEND _missing_rocm_deps "RPP (>= 3.1.2)")
+            endif()
+            if(NOT rocdecode_FOUND)
+                list(APPEND _missing_rocm_deps "rocDecode (>= 1.8.0, CONFIG)")
+            endif()
+            message(
+                WARNING
+                "ENABLE_ROCM requires HIP, RPP, and rocDecode. Missing: ${_missing_rocm_deps}. "
+                "Skipping ROCm support. Set ROCM_PATH if CMake cannot find your ROCm install."
+            )
+            set(ENABLE_ROCM OFF)
+        endif()
+    endif()
+
+    if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
+        list(APPEND core_sources
+            RocmDeviceInterface.cpp
+            RocDecCache.cpp
+            RocmCommon.cpp
+            RocDecodeRuntimeLoader.cpp
+        )
     endif()
 
     set(core_library_dependencies
@@ -139,21 +183,11 @@ function(make_torchcodec_libraries
         )
     endif()
 
-    if(ENABLE_ROCM)
-        # Find HIP and RPP (ROCm Performance Primitives) for ROCm
-        find_package(hip QUIET)
-        find_package(rpp 3.1.2 QUIET)
-
-        # Add HIP and RPP (ROCm Performance Primitives) libraries
-        if(hip_FOUND AND rpp_FOUND)
-            list(APPEND core_library_dependencies
-                hip::host
-                rpp::rpp
-            )
-        else()
-            message(WARNING "HIP and RPP not found, skipping ROCm support. To enable ROCm support, please install HIP and RPP.")
-            set(ENABLE_ROCM OFF)
-        endif()
+    if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
+        list(APPEND core_library_dependencies
+            hip::host
+            rpp::rpp
+        )
     endif()
 
     make_torchcodec_sublibrary(
@@ -162,6 +196,15 @@ function(make_torchcodec_libraries
         "${core_sources}"
         "${core_library_dependencies}"
     )
+
+    # rocDecode headers from find_package(rocdecode)
+    if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
+        target_include_directories(
+            ${core_library_name}
+            PRIVATE
+            "${rocdecode_INCLUDE_DIR}"
+        )
+    endif()
 
     # 2. Create libtorchcodec_custom_opsN.{ext}.
     set(custom_ops_library_name "libtorchcodec_custom_ops${ffmpeg_major_version}")

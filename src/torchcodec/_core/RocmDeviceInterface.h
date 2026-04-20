@@ -8,7 +8,7 @@
 // hardware decoder via rocDecode while keeping FFmpeg for demuxing.
 // Implementation inspired by NVDEC integration and DALI's approach.
 //
-// rocDecode SDK: https://github.com/ROCm/rocDecode
+// rocDecode Library: https://github.com/ROCm/rocm-systems/tree/develop/projects/rocdecode
 // AMD VCN (Video Core Next) Architecture docs:
 // https://rocm.docs.amd.com/projects/rocDecode/en/latest
 
@@ -27,9 +27,9 @@
 #include <unordered_map>
 #include <vector>
 
-// rocDecode headers
-#include "rocdecode_include/rocdecode.h"
-#include "rocdecode_include/rocparser.h"
+// rocDecode API headers
+#include <rocdecode/rocdecode.h>
+#include <rocdecode/rocparser.h>
 
 namespace facebook::torchcodec {
 
@@ -118,7 +118,7 @@ class RocmDeviceInterface : public DeviceInterface {
 // Note: [General design, sendPacket, receiveFrame, frame ordering and rocDecode callbacks]
 //
 // This interface provides hardware-accelerated video decoding on AMD GPUs using
-// rocDecode SDK (https://github.com/ROCm/rocDecode), which provides access to
+// rocDecode Library (https://github.com/ROCm/rocm-systems/tree/develop/projects/rocdecode), which provides access to
 // AMD's VCN (Video Core Next) hardware decoder.
 //
 // Architecture Design:
@@ -155,8 +155,7 @@ class RocmDeviceInterface : public DeviceInterface {
 //
 // When receiveFrame(AVFrame) is called, if readyFrames_ is not empty, we pop
 // the front of the queue, which is the next frame in display order, and get it
-// from the decoder by calling rocdecGetVideoFrame(). When done with the frame,
-// we release it using rocdecReleaseVideoFrame(). If readyFrames_ is empty we
+// from the decoder by calling rocdecGetVideoFrame(). If readyFrames_ is empty we
 // return EAGAIN to indicate the caller should send more packets.
 //
 // Note on Frame Lifetime:

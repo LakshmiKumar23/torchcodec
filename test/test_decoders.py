@@ -1805,12 +1805,7 @@ class TestVideoDecoder:
             TEST_SRC_2_720P,
             BT709_FULL_RANGE,
             TEST_SRC_2_720P_H265,
-            pytest.param(
-                AV1_VIDEO,
-                marks=pytest.mark.skipif(
-                    in_fbcode(), reason="AV1 ROCm not supported internally"
-                ),
-            ),
+            AV1_VIDEO,
             TEST_SRC_2_720P_VP9,
             TEST_SRC_2_720P_VP8,
             TEST_SRC_2_720P_MPEG4,
@@ -1855,12 +1850,7 @@ class TestVideoDecoder:
             TEST_SRC_2_720P,
             BT709_FULL_RANGE,
             TEST_SRC_2_720P_H265,
-            pytest.param(
-                AV1_VIDEO,
-                marks=pytest.mark.skipif(
-                    in_fbcode(), reason="AV1 ROCm not supported internally"
-                ),
-            ),
+            AV1_VIDEO,
             TEST_SRC_2_720P_VP9,
             TEST_SRC_2_720P_VP8,
             TEST_SRC_2_720P_MPEG4,
@@ -1905,12 +1895,7 @@ class TestVideoDecoder:
             TEST_SRC_2_720P,
             BT709_FULL_RANGE,
             TEST_SRC_2_720P_H265,
-            pytest.param(
-                AV1_VIDEO,
-                marks=pytest.mark.skipif(
-                    in_fbcode(), reason="AV1 ROCm not supported internally"
-                ),
-            ),
+            AV1_VIDEO,
             TEST_SRC_2_720P_VP9,
             TEST_SRC_2_720P_VP8,
             TEST_SRC_2_720P_MPEG4,
@@ -1944,12 +1929,7 @@ class TestVideoDecoder:
             TEST_SRC_2_720P,
             BT709_FULL_RANGE,
             TEST_SRC_2_720P_H265,
-            pytest.param(
-                AV1_VIDEO,
-                marks=pytest.mark.skipif(
-                    in_fbcode(), reason="AV1 ROCm not supported internally"
-                ),
-            ),
+            AV1_VIDEO,
             TEST_SRC_2_720P_VP9,
             TEST_SRC_2_720P_VP8,
             TEST_SRC_2_720P_MPEG4,
@@ -1989,12 +1969,7 @@ class TestVideoDecoder:
             TEST_SRC_2_720P,
             BT709_FULL_RANGE,
             TEST_SRC_2_720P_H265,
-            pytest.param(
-                AV1_VIDEO,
-                marks=pytest.mark.skipif(
-                    in_fbcode(), reason="AV1 ROCm not supported internally"
-                ),
-            ),
+            AV1_VIDEO,
             TEST_SRC_2_720P_VP9,
             TEST_SRC_2_720P_VP8,
             TEST_SRC_2_720P_MPEG4,

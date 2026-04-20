@@ -240,7 +240,9 @@ format you want. Refer to AMD's GPU support documentation for more details.
    cd torchcodec
 
    # Install with ROCm support
-   # Make sure you have ROCm toolkit installed (including rocDecode and RPP libraries)
+   # Make sure you have ROCm toolkit installed (including rocDecode and RPP libraries).
+   # Export ROCM_PATH before building so CMake can locate HIP, RPP, and rocDecode (default is often /opt/rocm).
+   export ROCM_PATH=/opt/rocm
    ENABLE_ROCM=1 pip install -e . --no-build-isolation
    ```
 
@@ -248,7 +250,8 @@ format you want. Refer to AMD's GPU support documentation for more details.
    and link against the rocDecode library.
 
    You'll need the following ROCm components installed:
-   - rocDecode: AMD's video decode SDK
+   - AMD's ROCm stack - [TheRock](https://github.com/ROCm/TheRock)
+   - [rocDecode](https://github.com/ROCm/rocm-systems/tree/develop/projects/rocdecode): AMD's video decode library - available as part of TheRock
    - RPP (ROCm Performance Primitives) version 3.1.2 and above: For image processing
    - HIP runtime
 
