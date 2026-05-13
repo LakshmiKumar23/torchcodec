@@ -134,7 +134,7 @@ function(make_torchcodec_libraries
                 WARNING
                 "ENABLE_ROCM is set but ROCM_PATH is not defined in the environment. "
                 "Set it to your ROCm install prefix (for example: export ROCM_PATH=/opt/rocm) "
-                "and reconfigure/rebuild so CMake can find HIP, RPP, and rocDecode."
+                "and reconfigure/rebuild."
             )
         endif()
         find_package(hip QUIET)

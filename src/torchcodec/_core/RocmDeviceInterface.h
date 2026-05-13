@@ -106,6 +106,9 @@ class RocmDeviceInterface : public DeviceInterface {
   
   // Store codec context for fallback color range info
   SharedAVCodecContext codecContext_;
+
+  // Chroma upsampling mode: NN for 8-bit, bilinear for 10-bit
+  ChromaUpsampling chromaUpsampling_ = ChromaUpsampling::kNearestNeighbor;
   
   // Software scaling context for format conversion (fallback)
   UniqueSwsContext swsContext_;

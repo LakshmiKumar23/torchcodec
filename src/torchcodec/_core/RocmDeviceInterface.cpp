@@ -259,7 +259,18 @@ void RocmDeviceInterface::initialize(
     [[maybe_unused]] const SharedAVCodecContext& codecContext) {
   // Store codec context for fallback color range info
   codecContext_ = codecContext;
-  
+
+  // Select chroma upsampling based on bit depth:
+  // - 10-bit: bilinear (best match for FFmpeg's scaled pipeline)
+  // - 8-bit: nearest-neighbor (matches FFmpeg's unscaled fast path)
+  const AVPixFmtDescriptor* desc =
+      av_pix_fmt_desc_get(codecContext->pix_fmt);
+  if (desc && desc->comp[0].depth > 8) {
+    chromaUpsampling_ = ChromaUpsampling::kLinear;
+  } else {
+    chromaUpsampling_ = ChromaUpsampling::kNearestNeighbor;
+  }
+
   if (!rocDecodeAvailable_ || !nativeRocDecodeSupport(codecContext)) {
     cpuFallback_ = createDeviceInterface(torch::kCPU);
     TORCH_CHECK(
@@ -736,7 +747,8 @@ void RocmDeviceInterface::convertAVFrameToFrameOutput(
   validatePreAllocatedTensorShape(preAllocatedOutputTensor, gpuFrame);
 
   frameOutput.data = convertNV12FrameToRGB(
-      gpuFrame, device_, rppCtx_, rocdecStream_, preAllocatedOutputTensor);
+      gpuFrame, device_, rppCtx_, rocdecStream_, chromaUpsampling_,
+      preAllocatedOutputTensor);
 
   // Synchronize the RPP stream to ensure color conversion completes
   // before the gpuFrame (NV12 buffer) is destroyed

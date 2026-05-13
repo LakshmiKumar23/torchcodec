@@ -69,6 +69,7 @@ torch::Tensor convertNV12FrameToRGB(
     const torch::Device& device,
     const UniqueRppContext& rppCtx,
     hipStream_t rocdecStream,
+    ChromaUpsampling chromaUpsampling,
     std::optional<torch::Tensor> preAllocatedOutputTensor) {
 
   auto frameDims = FrameDims(avFrame->height, avFrame->width);
@@ -175,7 +176,33 @@ torch::Tensor convertNV12FrameToRGB(
   const RpptColorRange colorRange =
       avColorRangeToRppColorRange(static_cast<AVColorRange>(avFrame->color_range));
 
-  RppStatus status = rppt_yuv_to_rgb(
+  using RppYuvToRgbFn = RppStatus (*)(
+      RppPtr_t, RppPtr_t, RpptDescPtr, RppPtr_t, RpptDescPtr,
+      Rpp32u, Rpp32u, Rpp32u, Rpp32u, Rpp32u,
+      RpptColorStandard, RpptColorRange, rppHandle_t, RppBackend);
+
+  RppYuvToRgbFn yuvToRgbFn;
+  const char* modeName;
+  switch (chromaUpsampling) {
+    case ChromaUpsampling::kCubic:
+      yuvToRgbFn = rppt_yuv_to_rgb_cubic_v;
+      modeName = "cubic";
+      break;
+    case ChromaUpsampling::kLinear:
+      yuvToRgbFn = rppt_yuv_to_rgb_linear_v;
+      modeName = "linear";
+      break;
+    case ChromaUpsampling::kNearestNeighbor:
+    default:
+      yuvToRgbFn = rppt_yuv_to_rgb;
+      modeName = "nearest-neighbor";
+      break;
+  }
+  std::cout << "Using " << modeName
+            << " chroma upsampling for NV12 to RGB conversion on ROCm."
+            << std::endl;
+
+  RppStatus status = yuvToRgbFn(
       yuvData[0],
       yuvData[1],
       &srcDesc,
@@ -192,7 +219,9 @@ torch::Tensor convertNV12FrameToRGB(
       RPP_HIP_BACKEND);
   TORCH_CHECK(
       status == RPP_SUCCESS,
-      "Failed to convert NV12 to RGB. Status: ",
+      "Failed to convert NV12 to RGB (",
+      modeName,
+      "). Status: ",
       status);
   return dst;
 }

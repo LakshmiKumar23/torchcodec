@@ -66,11 +66,19 @@ struct RppContextDeleter {
 // Unique pointer type for RPP context
 using UniqueRppContext = std::unique_ptr<RppContext, RppContextDeleter>;
 
+// Chroma upsampling mode for NV12→RGB conversion.
+enum class ChromaUpsampling {
+  kNearestNeighbor, // rppt_yuv_to_rgb: matches FFmpeg 8-bit unscaled fast path
+  kLinear,          // rppt_yuv_to_rgb_linear_v: best match for FFmpeg 10-bit
+  kCubic,           // rppt_yuv_to_rgb_cubic_v: FFmpeg-compatible cubic
+};
+
 torch::Tensor convertNV12FrameToRGB(
     UniqueAVFrame& avFrame,
     const torch::Device& device,
     const UniqueRppContext& rppCtx,
     hipStream_t rodecStream,
+    ChromaUpsampling chromaUpsampling,
     std::optional<torch::Tensor> preAllocatedOutputTensor = std::nullopt);
 
 UniqueRppContext getRppStreamContext(const torch::Device& device);
