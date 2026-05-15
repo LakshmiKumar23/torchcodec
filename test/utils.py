@@ -138,6 +138,16 @@ def cuda_version_used_for_building_torch() -> tuple[int, int | None]:
         return tuple(int(x) for x in torch.version.cuda.split("."))
 
 
+def rocm_version_used_for_building_torch() -> tuple[int, int] | None:
+    # Return the ROCm version that was used to build PyTorch.
+    # ROCm version format is like "6.2.41134" - we return (major, minor)
+    if torch.version.rocm is None:
+        return None
+    else:
+        version_parts = torch.version.rocm.split(".")
+        return tuple(int(x) for x in version_parts[:2])
+
+
 def psnr(a, b, max_val=255) -> float:
     # Return Peak Signal-to-Noise Ratio (PSNR) between two tensors a and b. The
     # higher, the better.

@@ -46,6 +46,7 @@ from .utils import (
     needs_rocm,
     psnr,
     rocm_devices,
+    rocm_version_used_for_building_torch,
     SINE_MONO_S16,
     SINE_MONO_S32,
     SINE_MONO_S32_44100,
@@ -2064,10 +2065,16 @@ class TestVideoDecoder:
             rocm_frame = decoder_rocm.get_frame_at(frame_index).data.cpu()
             cpu_frame = decoder_cpu.get_frame_at(frame_index).data
 
-            # Allow standard tolerance for GPU vs CPU color conversion
-            # Both full range and studio range should match closely with proper
-            # color_range handling in the HIP kernels
-            atol = 5
+            # Determine tolerance based on ROCm version
+            # Full and studio range BT709 color space support requires ROCm 7.0+
+            rocm_ver = rocm_version_used_for_building_torch()
+
+            if rocm_ver is not None and rocm_ver >= (7, 0):
+                # ROCm 7.0+ has proper BT709 color range handling
+                atol = 3
+            else:
+                # Older ROCm versions may have less accurate color conversion
+                atol = 5
             torch.testing.assert_close(rocm_frame, cpu_frame, rtol=0, atol=atol)
 
     @needs_rocm
