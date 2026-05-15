@@ -2201,6 +2201,12 @@ class TestVideoDecoder:
             assert_frames_equal(frame_rocm, frame_cpu_gpu)
 
     @needs_rocm
+    def test_rocm_interface_error(self):
+        """Test ROCm interface error handling for invalid device strings."""
+        with pytest.raises(RuntimeError, match="Invalid device string"):
+            VideoDecoder(NASA_VIDEO.path, device="cuda:0:bad_variant")
+
+    @needs_rocm
     @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
     def test_rocm_interface_get_frame_at_fails(self, seek_mode):
         """Test ROCm rocDecode interface error handling for get_frame_at."""
@@ -2646,34 +2652,60 @@ class TestVideoDecoder:
 
     @needs_ffmpeg_cli
     @needs_rocm
-    def test_rocm_custom_frame_mappings_init_fails(self):
+    @pytest.mark.parametrize(
+        "custom_frame_mappings,expected_match",
+        [
+            pytest.param(
+                None,
+                "seek_mode",
+                id="valid_content_approximate",
+            ),
+            ("{}", "The input is empty or missing the required 'frames' key."),
+            (
+                '{"valid": "json"}',
+                "The input is empty or missing the required 'frames' key.",
+            ),
+            (
+                '{"frames": [{"missing": "keys"}]}',
+                "keys are required in the frame metadata.",
+            ),
+        ],
+    )
+    def test_rocm_custom_frame_mappings_init_fails(
+        self, custom_frame_mappings, expected_match
+    ):
         """Test ROCm decoder custom frame mappings error handling."""
-        # Generate valid custom frame mappings using ffprobe (like CUDA test does)
-        custom_frame_mappings = NASA_VIDEO.generate_custom_frame_mappings(0)
-
-        # Should fail with approximate seek mode
-        with pytest.raises(ValueError, match="seek_mode"):
+        if custom_frame_mappings is None:
+            custom_frame_mappings = NASA_VIDEO.generate_custom_frame_mappings(0)
+        with pytest.raises(ValueError, match=expected_match):
             VideoDecoder(
                 NASA_VIDEO.path,
+                stream_index=0,
                 device="cuda",
                 custom_frame_mappings=custom_frame_mappings,
-                seek_mode="approximate",
+                seek_mode=("approximate" if expected_match == "seek_mode" else "exact"),
             )
 
     @needs_rocm
     def test_rocm_custom_frame_mappings_init_fails_invalid_json(self, tmp_path):
         """Test ROCm decoder with invalid JSON in custom frame mappings."""
-        json_file = tmp_path / "invalid.json"
-        json_file.write_text("not valid json{")
+        invalid_json_path = tmp_path / "invalid_json"
+        with open(invalid_json_path, "w+") as f:
+            f.write("invalid input")
 
-        with open(json_file) as invalid_mappings:
-            with pytest.raises(ValueError, match="Invalid custom frame mappings"):
-                VideoDecoder(
-                    NASA_VIDEO.path,
-                    device="cuda",
-                    custom_frame_mappings=invalid_mappings,
-                    seek_mode="exact",
-                )
+        # Test both file object and string
+        with open(invalid_json_path) as file_obj:
+            for custom_frame_mappings in [
+                file_obj,
+                file_obj.read(),
+            ]:
+                with pytest.raises(ValueError, match="Invalid custom frame mappings"):
+                    VideoDecoder(
+                        NASA_VIDEO.path,
+                        stream_index=0,
+                        device="cuda",
+                        custom_frame_mappings=custom_frame_mappings,
+                    )
 
     # Additional error handling tests (non-interface versions)
     @needs_rocm
