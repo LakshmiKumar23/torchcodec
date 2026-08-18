@@ -205,9 +205,7 @@ RocmDeviceInterface::RocmDeviceInterface(const torch::Device& device)
       hipGetErrorString(err));
 
   initializeRocmContextWithPytorch(device_);
-  
-  // Check if rocDecode library is available first
-  rocDecodeAvailable_ = loadRocDecodeLibrary();
+
   rppCtx_ = getRppStreamContext(device_);
 }
 
@@ -271,7 +269,7 @@ void RocmDeviceInterface::initialize(
     chromaUpsampling_ = ChromaUpsampling::kNearestNeighbor;
   }
 
-  if (!rocDecodeAvailable_ || !nativeRocDecodeSupport(codecContext)) {
+  if (!nativeRocDecodeSupport(codecContext)) {
     cpuFallback_ = createDeviceInterface(torch::kCPU);
     TORCH_CHECK(
         cpuFallback_ != nullptr, "Failed to create CPU device interface");
@@ -789,9 +787,6 @@ std::string RocmDeviceInterface::getDetails() {
   std::string details = "ROCm Device Interface.";
   if (cpuFallback_) {
     details += " Using CPU fallback.";
-    if (!rocDecodeAvailable_) {
-      details += " rocDecode not available!";
-    }
   } else {
     details += " Using AMD VCN (rocDecode).";
   }

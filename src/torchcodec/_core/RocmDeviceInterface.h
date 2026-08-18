@@ -102,8 +102,7 @@ class RocmDeviceInterface : public DeviceInterface {
 
   // CPU fallback for unsupported formats
   std::unique_ptr<DeviceInterface> cpuFallback_;
-  bool rocDecodeAvailable_ = false;
-  
+
   // Store codec context for fallback color range info
   SharedAVCodecContext codecContext_;
 

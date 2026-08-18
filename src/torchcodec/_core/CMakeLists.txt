@@ -162,7 +162,6 @@ function(make_torchcodec_libraries
             RocmDeviceInterface.cpp
             RocDecCache.cpp
             RocmCommon.cpp
-            RocDecodeRuntimeLoader.cpp
         )
     endif()
 
@@ -182,6 +181,7 @@ function(make_torchcodec_libraries
         list(APPEND core_library_dependencies
             hip::host
             rpp::rpp
+            rocdecode::rocdecode
         )
     endif()
 
