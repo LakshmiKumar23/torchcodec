@@ -38,27 +38,31 @@ class RocmDeviceInterface : public DeviceInterface {
   explicit RocmDeviceInterface(const StableDevice& device);
   virtual ~RocmDeviceInterface();
 
-  void initialize(
-      const AVStream* avStream,
-      const UniqueDecodingAVFormatContext& avFormatCtx,
-      const SharedAVCodecContext& codecContext) override;
+  // DeviceInterface overrides
+  void initialize(const SharedAVCodecContext& codec_context) override;
 
-  void convertAVFrameToFrameOutput(
-      UniqueAVFrame& avFrame,
-      FrameOutput& frameOutput,
-      std::optional<torch::stable::Tensor> preAllocatedOutputTensor) override;
+  void initialize_video_decoding(
+      const AVStream* av_stream,
+      const UniqueDecodingAVFormatContext& av_format_ctx,
+      const VideoStreamOptions& video_stream_options) override;
 
-  int sendPacket(ReferenceAVPacket& packet) override;
-  int sendEOFPacket() override;
-  int receiveFrame(UniqueAVFrame& avFrame) override;
+  void convert_av_frame_to_frame_output(
+      const AVFrame& av_frame,
+      FrameOutput& frame_output,
+      std::optional<torch::stable::Tensor> pre_allocated_output_tensor =
+          std::nullopt) override;
+
+  int send_packet(ReferenceAVPacket& av_packet) override;
+  int send_eof_packet() override;
+  int receive_frame(UniqueAVFrame& av_frame) override;
   void flush() override;
+
+  std::string get_details() override;
 
   // rocDecode callback functions (must be public for C callbacks)
   int handleVideoSequence(RocdecVideoFormat* videoFormat);
   int handlePictureDecode(RocdecPicParams* picParams);
   int handlePictureDisplay(RocdecParserDispInfo* dispInfo);
-
-  std::string getDetails() override;
 
  private:
   int sendRocDecPacket(RocdecSourceDataPacket& rocDecPacket);
@@ -111,7 +115,6 @@ class RocmDeviceInterface : public DeviceInterface {
   
   // Software scaling context for format conversion (fallback)
   UniqueSwsContext swsContext_;
-  SwsFrameContext prevSwsFrameContext_;
 };
 
 } // namespace facebook::torchcodec

@@ -66,24 +66,24 @@ void initializeRocmContextWithPytorch(const StableDevice& device) {
 }
 
 torch::stable::Tensor convertNV12FrameToRGB(
-    UniqueAVFrame& avFrame,
+    const AVFrame& avFrame,
     const StableDevice& device,
     const UniqueRppContext& rppCtx,
     hipStream_t rocdecStream,
     ChromaUpsampling chromaUpsampling,
     std::optional<torch::stable::Tensor> preAllocatedOutputTensor) {
 
-  auto frameDims = FrameDims(avFrame->height, avFrame->width);
+  auto frameDims = FrameDims(avFrame.height, avFrame.width);
   
   STD_TORCH_CHECK(
-      avFrame->format == AV_PIX_FMT_NV12,
+      avFrame.format == AV_PIX_FMT_NV12,
       "convertNV12FrameToRGB on ROCm expects NV12 (AV_PIX_FMT_NV12); "
       "rppt_yuv_to_rgb is 8-bit only. Got format: ",
-      av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame->format))
-          ? av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame->format))
+      av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame.format))
+          ? av_get_pix_fmt_name(static_cast<AVPixelFormat>(avFrame.format))
           : "unknown",
       " (format code: ",
-      avFrame->format,
+      avFrame.format,
       ")");
 
   torch::stable::Tensor dst;
@@ -93,7 +93,7 @@ torch::stable::Tensor convertNV12FrameToRGB(
         dst.scalar_type() == kStableUInt8,
         "ROCm NV12→RGB requires a uint8 HWC output tensor.");
   } else {
-    dst = allocate_empty_hwc_tensor(frameDims, device);
+    dst = allocate_empty_hwc_tensor(frameDims, device, OutputDtype::UINT8);
   }
 
   // We need to make sure rocDecode has finished decoding a frame before
@@ -133,7 +133,7 @@ torch::stable::Tensor convertNV12FrameToRGB(
       hipGetErrorString(err));
 
   // NV12: Y plane then interleaved UV (device pointers from rocDecode).
-  uint8_t* yuvData[2] = {avFrame->data[0], avFrame->data[1]};
+  uint8_t* yuvData[2] = {avFrame.data[0], avFrame.data[1]};
 
   rppStatus_t setStreamStatus =
       rppSetStream(rppCtx->handle, rppCtx->stream);
@@ -157,7 +157,7 @@ torch::stable::Tensor convertNV12FrameToRGB(
   srcDesc.strides.cStride = 1;
 
   const Rpp32u rgbRowBytes =
-      static_cast<Rpp32u>(dst.stride(0)) * static_cast<Rpp32u>(dst.element_size());
+      static_cast<Rpp32u>(dst.strides()[0]) * static_cast<Rpp32u>(dst.element_size());
   RpptDesc dstDesc{};
   dstDesc.numDims = 4;
   dstDesc.offsetInBytes = 0;
@@ -173,9 +173,9 @@ torch::stable::Tensor convertNV12FrameToRGB(
   dstDesc.strides.cStride = 1;
 
   const RpptColorStandard colStandard =
-      avColorSpaceToRppColStandard(static_cast<AVColorSpace>(avFrame->colorspace));
+      avColorSpaceToRppColStandard(static_cast<AVColorSpace>(avFrame.colorspace));
   const RpptColorRange colorRange =
-      avColorRangeToRppColorRange(static_cast<AVColorRange>(avFrame->color_range));
+      avColorRangeToRppColorRange(static_cast<AVColorRange>(avFrame.color_range));
 
   using RppYuvToRgbFn = RppStatus (*)(
       RppPtr_t, RppPtr_t, RpptDescPtr, RppPtr_t, RpptDescPtr,
@@ -207,10 +207,10 @@ torch::stable::Tensor convertNV12FrameToRGB(
       yuvData[0],
       yuvData[1],
       &srcDesc,
-      static_cast<uint8_t*>(dst.data_ptr()),
+      dst.mutable_data_ptr<uint8_t>(),
       &dstDesc,
-      static_cast<Rpp32u>(avFrame->linesize[0]),
-      static_cast<Rpp32u>(avFrame->linesize[1]),
+      static_cast<Rpp32u>(avFrame.linesize[0]),
+      static_cast<Rpp32u>(avFrame.linesize[1]),
       rgbRowBytes,
       static_cast<Rpp32u>(frameDims.width),
       static_cast<Rpp32u>(frameDims.height),
@@ -228,7 +228,7 @@ torch::stable::Tensor convertNV12FrameToRGB(
 }
 
 UniqueRppContext getRppStreamContext(const StableDevice& device) {
-  [[maybe_unused]] int deviceIndex = getDeviceIndex(device);
+  [[maybe_unused]] int deviceIndex = get_device_index(device);
 
   UniqueRppContext rppCtx = g_cached_rpp_ctxs.get(device);
   if (rppCtx) {
@@ -271,11 +271,11 @@ void returnRppStreamContextToCache(
 }
 
 void validatePreAllocatedTensorShape(
-    const std::optional<torch::Tensor>& preAllocatedOutputTensor,
-    const UniqueAVFrame& avFrame) {
+    const std::optional<torch::stable::Tensor>& preAllocatedOutputTensor,
+    const AVFrame& avFrame) {
   // Note that ROCm does not yet support transforms, so the only possible
   // frame dimensions are the raw decoded frame's dimensions.
-  auto frameDims = FrameDims(avFrame->height, avFrame->width);
+  auto frameDims = FrameDims(avFrame.height, avFrame.width);
 
   if (preAllocatedOutputTensor.has_value()) {
     auto shape = preAllocatedOutputTensor.value().sizes();
@@ -286,12 +286,13 @@ void validatePreAllocatedTensorShape(
         frameDims.height,
         "x",
         frameDims.width,
-        "x3, got ",
-        shape);
+        "x3, got shape with ",
+        shape.size(),
+        " dimensions");
   }
 }
 
-int getDeviceIndex(const StableDevice& device) {
+int get_device_index(const StableDevice& device) {
   // PyTorch uses int8_t as its StableDeviceIndex, but FFmpeg and HIP
   // libraries use int. So we use int, too.
   int deviceIndex = static_cast<int>(device.index());

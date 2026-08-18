@@ -4,7 +4,6 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
-#include <torch/types.h>
 #include <mutex>
 
 #include "RocmCommon.h"
@@ -21,7 +20,7 @@ namespace facebook::torchcodec {
 
 RocDecCache& RocDecCache::getCache(const StableDevice& device) {
   static RocDecCache cacheInstances[MAX_ROCM_GPUS];
-  return cacheInstances[getDeviceIndex(device)];
+  return cacheInstances[get_device_index(device)];
 }
 
 UniqueRocDecDecoder RocDecCache::getDecoder(RocdecVideoFormat* videoFormat) {

@@ -75,7 +75,7 @@ enum class ChromaUpsampling {
 };
 
 torch::stable::Tensor convertNV12FrameToRGB(
-    UniqueAVFrame& avFrame,
+    const AVFrame& avFrame,
     const StableDevice& device,
     const UniqueRppContext& rppCtx,
     hipStream_t rodecStream,
@@ -89,8 +89,8 @@ void returnRppStreamContextToCache(
 
 void validatePreAllocatedTensorShape(
     const std::optional<torch::stable::Tensor>& preAllocatedOutputTensor,
-    const UniqueAVFrame& avFrame);
+    const AVFrame& avFrame);
 
-int getDeviceIndex(const StableDevice& device);
+int get_device_index(const StableDevice& device);
 
 } // namespace facebook::torchcodec
