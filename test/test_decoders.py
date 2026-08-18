@@ -2710,6 +2710,9 @@ class TestVideoDecoder:
         Expect uint8 RGB (CHW) as expected by torchcodec. Match against the CPU
         decoder using the same rules as other GPU decode tests.
         """
+        if ffmpeg_major_version >= 6:
+            pytest.skip("H.265 10-bit has known color conversion differences in FFmpeg 6+")
+        
         asset = H265_10BITS
 
         decoder_rocm = VideoDecoder(asset.path, device="cuda")
@@ -3424,7 +3427,7 @@ class TestVideoDecoder:
     @needs_rocm
     def test_rocm_get_frame_at_av1(self):
         """Test ROCm decoder with AV1 video."""
-        if get_ffmpeg_major_version() == 4:
+        if ffmpeg_major_version == 4:
             pytest.skip("AV1 not supported in FFmpeg 4")
 
         decoder = VideoDecoder(AV1_VIDEO.path, device="cuda")
