@@ -13,7 +13,6 @@
 #include <hip/hip_runtime.h>
 #include <torch/types.h>
 
-#include "RocDecodeRuntimeLoader.h"
 #include <rocdecode/rocdecode.h>
 #include <rocdecode/rocparser.h>
 
