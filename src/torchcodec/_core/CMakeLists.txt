@@ -187,6 +187,7 @@ read_sources_from_bzl(TORCHCODEC_DECODER_CORE_SOURCES decoder_core_sources)
 read_sources_from_bzl(TORCHCODEC_FFMPEG_COMMON_SOURCES ffmpeg_common_sources)
 read_sources_from_bzl(TORCHCODEC_IO_SOURCES io_sources)
 read_sources_from_bzl(TORCHCODEC_DECODER_CORE_CUDA_SOURCES decoder_core_cuda_sources)
+read_sources_from_bzl(TORCHCODEC_DECODER_CORE_ROCM_SOURCES decoder_core_rocm_sources)
 read_sources_from_bzl(TORCHCODEC_FILE_LIKE_CONTEXT_SOURCES file_like_context_sources)
 read_sources_from_bzl(TORCHCODEC_CUSTOM_OPS_SOURCES custom_ops_sources)
 read_sources_from_bzl(TORCHCODEC_PYBIND_OPS_SOURCES pybind_ops_sources)
@@ -332,6 +333,49 @@ function(make_torchcodec_libraries
         list(APPEND core_sources ${TORCHCODEC_DECODER_CORE_CUDA_SOURCES})
     endif()
 
+    set(_torchcodec_rocm_deps_ok FALSE)
+    if(ENABLE_ROCM)
+        # ROCm builds require HIP, RPP, and the rocDecode CMake package from the same
+        # ROCm install (https://github.com/ROCm/TheRock)
+        if(DEFINED ENV{ROCM_PATH})
+            list(APPEND CMAKE_PREFIX_PATH "$ENV{ROCM_PATH}")
+        else()
+            message(
+                WARNING
+                "ENABLE_ROCM is set but ROCM_PATH is not defined in the environment. "
+                "Set it to your ROCm install prefix (for example: export ROCM_PATH=/opt/rocm) "
+                "and reconfigure/rebuild."
+            )
+        endif()
+        find_package(hip QUIET)
+        find_package(rpp 3.1.2 QUIET)
+        find_package(rocdecode 1.8.0 CONFIG QUIET)
+        if(hip_FOUND AND rpp_FOUND AND rocdecode_FOUND)
+            set(_torchcodec_rocm_deps_ok TRUE)
+        else()
+            set(_missing_rocm_deps "")
+            if(NOT hip_FOUND)
+                list(APPEND _missing_rocm_deps "HIP")
+            endif()
+            if(NOT rpp_FOUND)
+                list(APPEND _missing_rocm_deps "RPP (>= 3.1.2)")
+            endif()
+            if(NOT rocdecode_FOUND)
+                list(APPEND _missing_rocm_deps "rocDecode (>= 1.8.0, CONFIG)")
+            endif()
+            message(
+                WARNING
+                "ENABLE_ROCM requires HIP, RPP, and rocDecode. Missing: ${_missing_rocm_deps}. "
+                "Skipping ROCm support. Set ROCM_PATH if CMake cannot find your ROCm install."
+            )
+            set(ENABLE_ROCM OFF)
+        endif()
+    endif()
+
+    if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
+        list(APPEND core_sources ${TORCHCODEC_DECODER_CORE_ROCM_SOURCES})
+    endif()
+
     set(core_library_dependencies
         ${ffmpeg_target}
         ${TORCH_LIBRARIES}
@@ -358,6 +402,19 @@ function(make_torchcodec_libraries
             target_compile_options(${core_library_name} PRIVATE
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
         endif()
+    endif()
+
+    if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
+        # Link ROCm libraries and add include directories
+        target_link_libraries(${core_library_name} PRIVATE
+            hip::host
+            rpp::rpp
+            rocdecode::rocdecode
+        )
+        target_include_directories(${core_library_name} PRIVATE
+            "${rocdecode_INCLUDE_DIR}"
+        )
+        target_compile_definitions(${core_library_name} PRIVATE USE_ROCM)
     endif()
 
     # 2. Create libtorchcodec_custom_opsN.{ext}.

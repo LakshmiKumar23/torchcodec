@@ -66,6 +66,13 @@ decoder_core_cuda_sources = [
     "color_conversion.cu",
 ]
 
+# ROCm sources, added to the core library only for ROCm-enabled builds.
+decoder_core_rocm_sources = [
+    "RocmDeviceInterface.cpp",
+    "RocDecCache.cpp",
+    "RocmCommon.cpp",
+]
+
 file_like_context_sources = [
     "FileLikeIO.cpp",
 ]
