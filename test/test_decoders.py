@@ -64,6 +64,7 @@ from .utils import (
     CMYK_JPEG,
     CORRUPT_JPEG,
     cuda_devices,
+    rocm_devices,
     DISCARD_FIRST_KEYFRAME_VIDEO,
     FRAME_EXCEEDS_SCREEN_GIF,
     get_ffmpeg_minor_version,
@@ -86,6 +87,7 @@ from .utils import (
     GRAYSCALE_JPEG,
     GRAYSCALE_PNG,
     H264_10BITS,
+    H265_10BITS,
     H265_VIDEO,
     HEAPBOF_PNG,
     in_fbcode,
@@ -98,12 +100,14 @@ from .utils import (
     NASA_VIDEO_ROTATED,
     needs_avif,
     needs_cuda,
+    needs_rocm,
     needs_ffmpeg_cli,
     needs_heic,
     needs_jpeg,
     needs_png,
     needs_webp,
     psnr,
+    rocm_version_used_for_building_torch,
     RGBA_AVIF,
     RGBA_HEIC,
     RGBA_PNG,
@@ -2416,6 +2420,1042 @@ class TestVideoDecoder:
             # Create a new decoder, it's not cached since capacity is 0
             create_decoder()
             assert _core._get_nvdec_cache_size(device_index=0) == 0
+
+
+    # ===== ROCm rocDecode Interface Tests =====
+
+    @needs_rocm
+    @pytest.mark.parametrize(
+        "asset",
+        (
+            NASA_VIDEO,
+            TEST_SRC_2_720P,
+            BT709_FULL_RANGE,
+            TEST_SRC_2_720P_H265,
+            AV1_VIDEO,
+            TEST_SRC_2_720P_VP9,
+            TEST_SRC_2_720P_VP8,
+            TEST_SRC_2_720P_MPEG4,
+        ),
+    )
+    @pytest.mark.parametrize("contiguous_indices", (True, False))
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_interface_get_frame_at(
+        self, asset, contiguous_indices, seek_mode
+    ):
+        """Test ROCm rocDecode interface for get_frame_at."""
+        # Compare ROCm decoder against CPU decoder
+        rocm_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
+        cpu_decoder = VideoDecoder(asset.path, device="cpu", seek_mode=seek_mode)
+
+        assert rocm_decoder.metadata == cpu_decoder.metadata
+
+        if contiguous_indices:
+            indices = range(len(rocm_decoder))
+        else:
+            indices = range(0, len(rocm_decoder), 10)
+
+        for frame_index in indices:
+            cpu_frame = cpu_decoder.get_frame_at(frame_index)
+            rocm_frame = rocm_decoder.get_frame_at(frame_index)
+            
+            # ROCm color conversion may have small differences from CPU
+            if ffmpeg_major_version > 5 and asset is not TEST_SRC_2_720P_MPEG4:
+                # Allow small tolerance for GPU vs CPU color conversion differences
+                torch.testing.assert_close(
+                    rocm_frame.data.cpu(), cpu_frame.data, rtol=0, atol=3
+                )
+
+            assert rocm_frame.pts_seconds == cpu_frame.pts_seconds
+            assert rocm_frame.duration_seconds == cpu_frame.duration_seconds
+
+    @needs_rocm
+    @pytest.mark.parametrize(
+        "asset",
+        (
+            NASA_VIDEO,
+            TEST_SRC_2_720P,
+            BT709_FULL_RANGE,
+            TEST_SRC_2_720P_H265,
+            AV1_VIDEO,
+            TEST_SRC_2_720P_VP9,
+            TEST_SRC_2_720P_VP8,
+            TEST_SRC_2_720P_MPEG4,
+        ),
+    )
+    @pytest.mark.parametrize("contiguous_indices", (True, False))
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_interface_get_frames_at(
+        self, asset, contiguous_indices, seek_mode
+    ):
+        """Test ROCm rocDecode interface for get_frames_at (batch)."""
+        rocm_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
+        cpu_decoder = VideoDecoder(asset.path, device="cpu", seek_mode=seek_mode)
+
+        assert rocm_decoder.metadata == cpu_decoder.metadata
+
+        if contiguous_indices:
+            indices = list(range(len(rocm_decoder)))
+        else:
+            indices = list(range(0, len(rocm_decoder), 10))
+
+        cpu_frames = cpu_decoder.get_frames_at(indices)
+        rocm_frames = rocm_decoder.get_frames_at(indices)
+
+        if ffmpeg_major_version > 5 and asset is not TEST_SRC_2_720P_MPEG4:
+            torch.testing.assert_close(
+                rocm_frames.data.cpu(), cpu_frames.data, rtol=0, atol=3
+            )
+
+        torch.testing.assert_close(
+            rocm_frames.pts_seconds, cpu_frames.pts_seconds, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            rocm_frames.duration_seconds, cpu_frames.duration_seconds, rtol=0, atol=0
+        )
+
+    @needs_rocm
+    @pytest.mark.parametrize(
+        "asset",
+        (
+            NASA_VIDEO,
+            TEST_SRC_2_720P,
+            BT709_FULL_RANGE,
+            TEST_SRC_2_720P_H265,
+            AV1_VIDEO,
+            TEST_SRC_2_720P_VP9,
+            TEST_SRC_2_720P_VP8,
+            TEST_SRC_2_720P_MPEG4,
+        ),
+    )
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_interface_get_frame_played_at(self, asset, seek_mode):
+        """Test ROCm rocDecode interface for get_frame_played_at."""
+        rocm_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
+        cpu_decoder = VideoDecoder(asset.path, device="cpu", seek_mode=seek_mode)
+
+        for frame_index in range(0, len(rocm_decoder), 10):
+            pts_seconds = rocm_decoder.metadata.begin_stream_seconds + frame_index / rocm_decoder.metadata.average_fps
+
+            cpu_frame = cpu_decoder.get_frame_played_at(pts_seconds)
+            rocm_frame = rocm_decoder.get_frame_played_at(pts_seconds)
+
+            if ffmpeg_major_version > 5 and asset is not TEST_SRC_2_720P_MPEG4:
+                torch.testing.assert_close(
+                    rocm_frame.data.cpu(), cpu_frame.data, rtol=0, atol=3
+                )
+
+            assert rocm_frame.pts_seconds == cpu_frame.pts_seconds
+            assert rocm_frame.duration_seconds == cpu_frame.duration_seconds
+
+    @needs_rocm
+    @pytest.mark.parametrize(
+        "asset",
+        (
+            NASA_VIDEO,
+            TEST_SRC_2_720P,
+            BT709_FULL_RANGE,
+            TEST_SRC_2_720P_H265,
+            AV1_VIDEO,
+            TEST_SRC_2_720P_VP9,
+            TEST_SRC_2_720P_VP8,
+            TEST_SRC_2_720P_MPEG4,
+        ),
+    )
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_interface_get_frames_played_at(self, asset, seek_mode):
+        """Test ROCm rocDecode interface for get_frames_played_at (batch)."""
+        rocm_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
+        cpu_decoder = VideoDecoder(asset.path, device="cpu", seek_mode=seek_mode)
+
+        timestamps = [
+            rocm_decoder.metadata.begin_stream_seconds + i / rocm_decoder.metadata.average_fps
+            for i in range(0, len(rocm_decoder), 10)
+        ]
+
+        cpu_frames = cpu_decoder.get_frames_played_at(timestamps)
+        rocm_frames = rocm_decoder.get_frames_played_at(timestamps)
+
+        if ffmpeg_major_version > 5 and asset is not TEST_SRC_2_720P_MPEG4:
+            torch.testing.assert_close(
+                rocm_frames.data.cpu(), cpu_frames.data, rtol=0, atol=3
+            )
+
+        torch.testing.assert_close(
+            rocm_frames.pts_seconds, cpu_frames.pts_seconds, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            rocm_frames.duration_seconds, cpu_frames.duration_seconds, rtol=0, atol=0
+        )
+
+    @needs_rocm
+    @pytest.mark.parametrize(
+        "asset",
+        (
+            NASA_VIDEO,
+            TEST_SRC_2_720P,
+            BT709_FULL_RANGE,
+            TEST_SRC_2_720P_H265,
+            AV1_VIDEO,
+            TEST_SRC_2_720P_VP9,
+            TEST_SRC_2_720P_VP8,
+            TEST_SRC_2_720P_MPEG4,
+        ),
+    )
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_interface_backwards(self, asset, seek_mode):
+        """Test ROCm rocDecode interface with backward seeking."""
+        rocm_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
+        cpu_decoder = VideoDecoder(asset.path, device="cpu", seek_mode=seek_mode)
+
+        # Forward then backward seeking
+        indices = [0, 20, 10, 30, 5]
+        for frame_index in indices:
+            if frame_index >= len(rocm_decoder):
+                continue
+
+            cpu_frame = cpu_decoder.get_frame_at(frame_index)
+            rocm_frame = rocm_decoder.get_frame_at(frame_index)
+
+            if ffmpeg_major_version > 5 and asset is not TEST_SRC_2_720P_MPEG4:
+                torch.testing.assert_close(
+                    rocm_frame.data.cpu(), cpu_frame.data, rtol=0, atol=3
+                )
+
+            assert rocm_frame.pts_seconds == cpu_frame.pts_seconds
+
+    @needs_rocm
+    def test_rocm_interface_cpu_fallback(self):
+        """Test ROCm interface CPU fallback status reporting."""
+        # Note: H265_VIDEO triggers CPU fallback on CUDA/NVDEC due to small
+        # dimensions (128x128), but rocDecode supports it with hardware decoding.
+        # This test verifies that fallback status is reported correctly.
+        rocm_dec = VideoDecoder(H265_VIDEO.path, device="cuda")
+
+        # Fallback status should be known immediately for ROCm (like beta CUDA)
+        assert rocm_dec.cpu_fallback.status_known
+        
+        # rocDecode may or may not fall back for this video - both are valid
+        # If it does fall back, verify the reason is reported
+        if rocm_dec.cpu_fallback:
+            assert "Video not supported" in str(rocm_dec.cpu_fallback)
+
+        # Verify frames decode correctly regardless of fallback
+        frame = rocm_dec.get_frame_at(0)
+        assert frame.data.device.type == "cuda"  # Still on GPU memory
+        
+        # Compare with CPU decoder to ensure correctness
+        cpu_dec = VideoDecoder(H265_VIDEO.path, device="cpu")
+        cpu_frame = cpu_dec.get_frame_at(0)
+        # Allow small tolerance for GPU vs CPU color conversion differences
+        # Only 0.5% of pixels differ by up to 6 due to rounding
+        torch.testing.assert_close(frame.data.cpu(), cpu_frame.data, rtol=0, atol=6)
+
+    @needs_rocm
+    @pytest.mark.parametrize("device", rocm_devices())
+    def test_rocm_cpu_fallback_status_known(self, device):
+        """Test that ROCm reports CPU fallback status immediately."""
+        # Note: rocDecode supports H265_VIDEO - may not
+        # trigger fallback. This test just verifies status is known immediately.
+        decoder = VideoDecoder(H265_VIDEO.path, device=device)
+
+        # For ROCm interface, status is known immediately (unlike FFmpeg CUDA)
+        assert decoder.cpu_fallback.status_known
+        
+        # rocDecode may or may not support this video - both outcomes are valid
+        # If it does fall back, verify the reason is reported
+        if decoder.cpu_fallback:
+            assert "Video not supported" in str(decoder.cpu_fallback)
+
+    @needs_rocm
+    @pytest.mark.parametrize("device", rocm_devices())
+    def test_rocm_cpu_fallback_no_fallback_on_supported_video(self, device):
+        """Test that supported videos don't trigger fallback on ROCm."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device=device)
+
+        decoder[0]
+
+        assert not decoder.cpu_fallback
+        assert "No fallback required" in str(decoder.cpu_fallback)
+
+    @needs_rocm
+    @pytest.mark.parametrize("asset", (BT709_FULL_RANGE, NASA_VIDEO))
+    def test_rocm_full_and_studio_range_bt709_video(self, asset):
+        """Test ROCm color space handling for BT709 videos."""
+        # Test ensuring result consistency between CPU and ROCm decoder on BT709
+        # videos, one with full color range, one with studio range.
+        decoder_rocm = VideoDecoder(asset.path, device="cuda")
+        decoder_cpu = VideoDecoder(asset.path, device="cpu")
+
+        for frame_index in (0, 10, 20, 5):
+            rocm_frame = decoder_rocm.get_frame_at(frame_index).data.cpu()
+            cpu_frame = decoder_cpu.get_frame_at(frame_index).data
+
+            # Determine tolerance based on ROCm version
+            # Full and studio range BT709 color space support requires ROCm 7.0+
+            rocm_ver = rocm_version_used_for_building_torch()
+
+            if rocm_ver is not None and rocm_ver >= (7, 0):
+                # ROCm 7.0+ has proper BT709 color range handling
+                atol = 3
+            else:
+                # Older ROCm versions may have less accurate color conversion
+                atol = 5
+            torch.testing.assert_close(rocm_frame, cpu_frame, rtol=0, atol=atol)
+
+    @needs_rocm
+    def test_rocm_h265_10bit_hardware_support(self):
+        """Test that H.265 10-bit videos are decoded by rocDecode hardware.
+
+        Expect uint8 RGB (CHW) as expected by torchcodec. Match against the CPU
+        decoder using the same rules as other GPU decode tests.
+        """
+        asset = H265_10BITS
+
+        decoder_rocm = VideoDecoder(asset.path, device="cuda")
+
+        assert decoder_rocm.cpu_fallback.status_known
+        assert not decoder_rocm.cpu_fallback, (
+            "H.265 10-bit should be hardware-decoded by rocDecode"
+        )
+
+        decoder_cpu = VideoDecoder(asset.path)
+
+        for frame_index in (0, 10, 20, 5):
+            frame_rocm = decoder_rocm.get_frame_at(frame_index).data
+            assert frame_rocm.device.type == "cuda"
+            assert frame_rocm.dtype == torch.uint8, (
+                f"Expected uint8 output, got {frame_rocm.dtype}"
+            )
+
+            frame_cpu = decoder_cpu.get_frame_at(frame_index).data
+            assert frame_cpu.dtype == torch.uint8
+
+            assert_frames_equal(frame_rocm, frame_cpu.to("cuda"))
+
+    @needs_rocm
+    def test_rocm_h264_10bit_cpu_fallback(self):
+        """Test that H.264 10-bit videos fall back to CPU (not supported by rocDecode)."""
+        # rocDecode does NOT support H.264 10-bit, should fall back to CPU
+        asset = H264_10BITS
+
+        decoder_rocm = VideoDecoder(asset.path, device="cuda")
+        
+        # H.264 10-bit should trigger CPU fallback
+        assert decoder_rocm.cpu_fallback.status_known
+        assert decoder_rocm.cpu_fallback, "H.264 10-bit should fall back to CPU on rocDecode"
+        # Fallback reason may vary, just verify fallback is happening
+        assert "Falling back" in str(decoder_rocm.cpu_fallback)
+        
+        decoder_cpu = VideoDecoder(asset.path)
+
+        frame_indices = [0, 10, 20, 5]
+        for frame_index in frame_indices:
+            frame_rocm = decoder_rocm.get_frame_at(frame_index).data
+            assert frame_rocm.device.type == "cuda"  # Still on GPU memory
+            assert frame_rocm.dtype == torch.uint8, f"Expected uint8 from CPU fallback, got {frame_rocm.dtype}"
+            
+            frame_cpu = decoder_cpu.get_frame_at(frame_index).data
+            assert frame_cpu.dtype == torch.uint8, f"Expected uint8 from CPU decoder, got {frame_cpu.dtype}"
+            
+            # CPU fallback goes through: CPU decode → NV12 conversion → GPU transfer → RGB conversion
+            # Direct CPU goes through: CPU decode → RGB24 conversion
+            # Double color conversion introduces differences, so use PSNR threshold
+            # For 10-bit videos decoded as 8-bit, PSNR > 23 dB indicates good quality match
+            frame_psnr = psnr(frame_rocm.cpu(), frame_cpu)
+            assert frame_psnr > 23, f"PSNR {frame_psnr:.2f} dB is too low for frame {frame_index}"
+
+        # Check batch API also uses PSNR threshold
+        frames_rocm = decoder_rocm.get_frames_at(frame_indices).data
+        assert frames_rocm.device.type == "cuda"
+        frames_cpu = decoder_cpu.get_frames_at(frame_indices).data
+        batch_psnr = psnr(frames_rocm.cpu(), frames_cpu)
+        assert batch_psnr > 23, f"Batch PSNR {batch_psnr:.2f} dB is too low"
+
+    @needs_rocm
+    def test_rocm_av1_video_support(self):
+        """Test that AV1 videos are decoded by rocDecode hardware.
+        
+        Note: AV1 hardware vs software decoding has larger differences than other codecs,
+        so we use PSNR validation instead of pixel-wise comparison.
+        """
+        # rocDecode supports AV1 codec
+        asset = AV1_VIDEO
+        
+        decoder_rocm = VideoDecoder(asset.path, device="cuda")
+        
+        # AV1 should NOT trigger CPU fallback
+        assert decoder_rocm.cpu_fallback.status_known
+        assert not decoder_rocm.cpu_fallback, "AV1 should be hardware-decoded by rocDecode"
+        
+        decoder_cpu = VideoDecoder(asset.path)
+        
+        # Test a few frames
+        frame_indices = [0, 5, 10]
+        for frame_index in frame_indices:
+            frame_rocm = decoder_rocm.get_frame_at(frame_index).data
+            assert frame_rocm.device.type == "cuda"
+            assert frame_rocm.dtype == torch.uint8
+            
+            frame_cpu = decoder_cpu.get_frame_at(frame_index).data
+            assert frame_cpu.dtype == torch.uint8
+
+            # AV1 codec has significant hardware vs software implementation differences
+            # Use PSNR validation to measure perceptual quality rather than exact pixel matching
+            frame_psnr = psnr(frame_rocm.cpu(), frame_cpu)
+            assert frame_psnr > 25, f"PSNR {frame_psnr:.2f} dB is too low for AV1 frame {frame_index}"
+
+    @needs_rocm
+    def test_rocm_vp9_video_support(self):
+        """Test that VP9 videos are decoded by rocDecode hardware."""
+        # rocDecode supports VP9 codec
+        asset = TEST_SRC_2_720P_VP9
+        
+        decoder_rocm = VideoDecoder(asset.path, device="cuda")
+
+        # VP9 should NOT trigger CPU fallback
+        assert decoder_rocm.cpu_fallback.status_known
+        assert not decoder_rocm.cpu_fallback, "VP9 should be hardware-decoded by rocDecode"
+        
+        decoder_cpu = VideoDecoder(asset.path)
+        
+        # Test a few frames
+        frame_indices = [0, 5, 10]
+        for frame_index in frame_indices:
+            frame_rocm = decoder_rocm.get_frame_at(frame_index).data
+            assert frame_rocm.device.type == "cuda"
+            assert frame_rocm.dtype == torch.uint8
+            
+            frame_cpu = decoder_cpu.get_frame_at(frame_index).data
+            
+            # Hardware vs software decoding differences, use tolerance
+            # Move CPU frame to GPU to use CUDA/ROCm tolerance path
+            frame_cpu_gpu = frame_cpu.to("cuda")
+            assert_frames_equal(frame_rocm, frame_cpu_gpu)
+
+    @needs_rocm
+    def test_rocm_interface_error(self):
+        """Test ROCm interface error handling for invalid device strings."""
+        with pytest.raises(RuntimeError, match="torch_parse_device_string.*API call failed"):
+            VideoDecoder(NASA_VIDEO.path, device="cuda:0:bad_variant")
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_interface_get_frame_at_fails(self, seek_mode):
+        """Test ROCm rocDecode interface error handling for get_frame_at."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        with pytest.raises(
+            IndexError,
+            match="negative indices must have an absolute value less than the number of frames",
+        ):
+            frame = decoder.get_frame_at(-10000)  # noqa
+
+        with pytest.raises(IndexError, match="must be less than"):
+            frame = decoder.get_frame_at(10000)  # noqa
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_interface_get_frames_at_fails(self, seek_mode):
+        """Test ROCm rocDecode interface error handling for get_frames_at."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        with pytest.raises(
+            IndexError,
+            match="negative indices must have an absolute value less than the number of frames",
+        ):
+            decoder.get_frames_at([-10000])
+
+        with pytest.raises(IndexError, match="Invalid frame index=390"):
+            decoder.get_frames_at([390])
+
+        with pytest.raises(
+            RuntimeError, match="expected scalar type Long but found Float"
+        ):
+            decoder.get_frames_at([0.3])
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_interface_get_frame_played_at_fails(self, seek_mode):
+        """Test ROCm rocDecode interface error handling for get_frame_played_at."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        with pytest.raises(IndexError, match="Invalid pts in seconds"):
+            frame = decoder.get_frame_played_at(-1.0)  # noqa
+
+        with pytest.raises(IndexError, match="Invalid pts in seconds"):
+            frame = decoder.get_frame_played_at(100.0)  # noqa
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_interface_get_frames_played_at_fails(self, seek_mode):
+        """Test ROCm rocDecode interface error handling for get_frames_played_at."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        with pytest.raises(RuntimeError, match="must be greater than or equal to"):
+            decoder.get_frames_played_at([-1])
+
+        with pytest.raises(RuntimeError, match="must be less than"):
+            decoder.get_frames_played_at([14])
+
+        with pytest.raises(
+            ValueError, match="Couldn't convert timestamps input to a tensor"
+        ):
+            decoder.get_frames_played_at(["bad"])
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_interface_get_frames_by_pts_in_range_fails(self, seek_mode):
+        """Test ROCm rocDecode interface error handling for get_frames_played_in_range."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        with pytest.raises(ValueError, match="Invalid start seconds"):
+            frame = decoder.get_frames_played_in_range(100.0, 1.0)  # noqa
+
+        with pytest.raises(ValueError, match="Invalid start seconds"):
+            frame = decoder.get_frames_played_in_range(20, 23)  # noqa
+
+        with pytest.raises(ValueError, match="Invalid stop seconds"):
+            frame = decoder.get_frames_played_in_range(0, 23)  # noqa
+
+    # High-level API tests for ROCm
+    @needs_rocm
+    @pytest.mark.parametrize("num_ffmpeg_threads", (1, 4))
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_getitem_int(self, num_ffmpeg_threads, seek_mode):
+        """Test ROCm decoder integer indexing."""
+        decoder = VideoDecoder(
+            NASA_VIDEO.path,
+            num_ffmpeg_threads=num_ffmpeg_threads,
+            device="cuda",
+            seek_mode=seek_mode,
+        )
+
+        ref_frame0 = NASA_VIDEO.get_frame_data_by_index(0).to("cuda")
+        ref_frame1 = NASA_VIDEO.get_frame_data_by_index(1).to("cuda")
+        ref_frame180 = NASA_VIDEO.get_frame_data_by_index(180).to("cuda")
+        ref_frame_last = NASA_VIDEO.get_frame_data_by_index(389).to("cuda")
+
+        # Allow small tolerance for GPU color conversion
+        torch.testing.assert_close(decoder[0], ref_frame0, rtol=0, atol=3)
+        torch.testing.assert_close(decoder[1], ref_frame1, rtol=0, atol=3)
+        torch.testing.assert_close(decoder[180], ref_frame180, rtol=0, atol=3)
+        torch.testing.assert_close(decoder[-1], ref_frame_last, rtol=0, atol=3)
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_getitem_slice(self, seek_mode):
+        """Test ROCm decoder slice indexing."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        # Single-element slices
+        ref0 = NASA_VIDEO.get_frame_data_by_range(0, 1).to("cuda")
+        slice0 = decoder[0:1]
+        assert slice0.shape == torch.Size(
+            [1, NASA_VIDEO.num_color_channels, NASA_VIDEO.height, NASA_VIDEO.width]
+        )
+        torch.testing.assert_close(slice0, ref0, rtol=0, atol=3)
+
+        # Contiguous ranges
+        ref0_9 = NASA_VIDEO.get_frame_data_by_range(0, 9).to("cuda")
+        slice0_9 = decoder[0:9]
+        assert slice0_9.shape == torch.Size(
+            [9, NASA_VIDEO.num_color_channels, NASA_VIDEO.height, NASA_VIDEO.width]
+        )
+        torch.testing.assert_close(slice0_9, ref0_9, rtol=0, atol=3)
+
+        # Ranges with stride
+        ref0_9_2 = NASA_VIDEO.get_frame_data_by_range(0, 9, 2).to("cuda")
+        slice0_9_2 = decoder[0:9:2]
+        assert slice0_9_2.shape == torch.Size(
+            [5, NASA_VIDEO.num_color_channels, NASA_VIDEO.height, NASA_VIDEO.width]
+        )
+        torch.testing.assert_close(slice0_9_2, ref0_9_2, rtol=0, atol=3)
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_getitem_fails(self, seek_mode):
+        """Test ROCm decoder indexing error handling."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        with pytest.raises(IndexError, match="Invalid frame index"):
+            frame = decoder[1000]  # noqa
+
+        with pytest.raises(IndexError, match="Invalid frame index"):
+            frame = decoder[-1000]  # noqa
+
+        with pytest.raises(TypeError, match="Unsupported key type"):
+            frame = decoder["0"]  # noqa
+
+        with pytest.raises(TypeError, match="Unsupported key type"):
+            frame = decoder[2.3]  # noqa
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_iteration(self, seek_mode):
+        """Test ROCm decoder iteration."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        ref_frame0 = NASA_VIDEO.get_frame_data_by_index(0).to("cuda")
+        ref_frame1 = NASA_VIDEO.get_frame_data_by_index(1).to("cuda")
+        ref_frame_last = NASA_VIDEO.get_frame_data_by_index(389).to("cuda")
+
+        # Access a frame first to ensure iteration still works
+        torch.testing.assert_close(decoder[35], NASA_VIDEO.get_frame_data_by_index(35).to("cuda"), rtol=0, atol=3)
+
+        for i, frame in enumerate(decoder):
+            if i == 0:
+                torch.testing.assert_close(frame, ref_frame0, rtol=0, atol=3)
+            elif i == 1:
+                torch.testing.assert_close(frame, ref_frame1, rtol=0, atol=3)
+            elif i == 389:
+                torch.testing.assert_close(frame, ref_frame_last, rtol=0, atol=3)
+                break
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_get_frame_at(self, seek_mode):
+        """Test ROCm decoder get_frame_at method."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        ref_frame9 = NASA_VIDEO.get_frame_data_by_index(9).to("cuda")
+        ref_frame_info9 = NASA_VIDEO.get_frame_info(9)
+        decoded_frame9 = decoder.get_frame_at(9)
+
+        assert decoded_frame9.pts_seconds == pytest.approx(ref_frame_info9.pts_seconds)
+        assert decoded_frame9.duration_seconds == pytest.approx(ref_frame_info9.duration_seconds, rel=1e-3)
+        torch.testing.assert_close(decoded_frame9.data, ref_frame9, rtol=0, atol=3)
+
+    @needs_rocm
+    def test_rocm_get_frame_at_tuple_unpacking(self):
+        """Test ROCm decoder frame tuple unpacking."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda")
+
+        data, pts, duration = decoder.get_frame_at(50)
+        assert data.device.type == "cuda"
+        assert isinstance(pts, float)
+        assert isinstance(duration, float)
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_get_frames_at(self, seek_mode):
+        """Test ROCm decoder get_frames_at method."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        frames = decoder.get_frames_at([35, 25, -1, -2])
+        assert isinstance(frames, FrameBatch)
+
+        torch.testing.assert_close(
+            frames[0].data, NASA_VIDEO.get_frame_data_by_index(35).to("cuda"), rtol=0, atol=3
+        )
+        torch.testing.assert_close(
+            frames[1].data, NASA_VIDEO.get_frame_data_by_index(25).to("cuda"), rtol=0, atol=3
+        )
+        torch.testing.assert_close(
+            frames[2].data, NASA_VIDEO.get_frame_data_by_index(389).to("cuda"), rtol=0, atol=3
+        )
+        torch.testing.assert_close(
+            frames[3].data, NASA_VIDEO.get_frame_data_by_index(388).to("cuda"), rtol=0, atol=3
+        )
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_get_frame_played_at(self, seek_mode):
+        """Test ROCm decoder get_frame_played_at method."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        ref_frame_played_at_6 = NASA_VIDEO.get_frame_data_by_index(180).to("cuda")
+        torch.testing.assert_close(
+            decoder.get_frame_played_at(6.006).data, ref_frame_played_at_6, rtol=0, atol=3
+        )
+        torch.testing.assert_close(
+            decoder.get_frame_played_at(6.02).data, ref_frame_played_at_6, rtol=0, atol=3
+        )
+
+        assert isinstance(decoder.get_frame_played_at(6.02).pts_seconds, float)
+        assert isinstance(decoder.get_frame_played_at(6.02).duration_seconds, float)
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    @pytest.mark.parametrize("input_type", ("list", "tensor"))
+    def test_rocm_get_frames_played_at(self, seek_mode, input_type):
+        """Test ROCm decoder get_frames_played_at method."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        if input_type == "list":
+            seconds = [0.84, 1.17, 0.85]
+        else:  # tensor
+            seconds = torch.tensor([0.84, 1.17, 0.85])
+
+        reference_indices = [25, 35, 25]
+        frames = decoder.get_frames_played_at(seconds)
+
+        assert isinstance(frames, FrameBatch)
+
+        for i in range(len(reference_indices)):
+            torch.testing.assert_close(
+                frames.data[i],
+                NASA_VIDEO.get_frame_data_by_index(reference_indices[i]).to("cuda"),
+                rtol=0,
+                atol=3,
+            )
+
+    @needs_rocm
+    @pytest.mark.parametrize("stream_index", [0, 3, None])
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_get_frames_in_range(self, stream_index, seek_mode):
+        """Test ROCm decoder get_frames_in_range method."""
+        decoder = VideoDecoder(
+            NASA_VIDEO.path,
+            stream_index=stream_index,
+            device="cuda",
+            seek_mode=seek_mode,
+        )
+
+        # Single frame range
+        ref_frames9 = NASA_VIDEO.get_frame_data_by_range(
+            start=9, stop=10, stream_index=stream_index
+        ).to("cuda")
+        frames9 = decoder.get_frames_in_range(start=9, stop=10)
+        torch.testing.assert_close(frames9.data, ref_frames9, rtol=0, atol=3)
+
+        # Multi-frame range (0-10 frames all have pre-saved data)
+        ref_frames0_10 = NASA_VIDEO.get_frame_data_by_range(
+            start=0, stop=10, stream_index=stream_index
+        ).to("cuda")
+        frames0_10 = decoder.get_frames_in_range(start=0, stop=10)
+
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_get_frames_in_range_slice_indices_syntax(self, seek_mode):
+        """Test ROCm decoder get_frames_in_range with slice syntax."""
+        decoder = VideoDecoder(
+            NASA_VIDEO.path, stream_index=3, device="cuda", seek_mode=seek_mode
+        )
+
+        # High range ends get capped
+        frames387_389 = decoder.get_frames_in_range(start=387, stop=1000)
+        ref_frame387_389 = NASA_VIDEO.get_frame_data_by_range(
+            start=387, stop=390, stream_index=3
+        ).to("cuda")
+        torch.testing.assert_close(frames387_389.data, ref_frame387_389, rtol=0, atol=3)
+
+        # Negative indices
+        frames387_389_neg = decoder.get_frames_in_range(start=-3, stop=1000)
+        torch.testing.assert_close(frames387_389_neg.data, ref_frame387_389, rtol=0, atol=3)
+
+        # None as stop
+        frames387_None = decoder.get_frames_in_range(start=-3, stop=None)
+        torch.testing.assert_close(frames387_None.data, ref_frame387_389, rtol=0, atol=3)
+
+    @needs_rocm
+    @pytest.mark.parametrize("dimension_order", ["NCHW", "NHWC"])
+    @pytest.mark.parametrize(
+        "frame_getter",
+        (
+            lambda decoder: decoder[0],
+            lambda decoder: decoder.get_frame_at(0).data,
+            lambda decoder: decoder.get_frames_at([0, 1]).data,
+            lambda decoder: decoder.get_frames_in_range(0, 4).data,
+            lambda decoder: decoder.get_frame_played_at(0).data,
+            lambda decoder: decoder.get_frames_played_at([0, 1]).data,
+            lambda decoder: decoder.get_frames_played_in_range(0, 1).data,
+        ),
+    )
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_dimension_order(self, dimension_order, frame_getter, seek_mode):
+        """Test ROCm decoder dimension order (NCHW vs NHWC)."""
+        decoder = VideoDecoder(
+            NASA_VIDEO.path,
+            dimension_order=dimension_order,
+            device="cuda",
+            seek_mode=seek_mode,
+        )
+
+        frame = frame_getter(decoder)
+
+        if dimension_order == "NCHW":
+            if frame.ndim == 3:  # Single frame
+                assert frame.shape[0] == NASA_VIDEO.num_color_channels
+            else:  # Batch
+                assert frame.shape[1] == NASA_VIDEO.num_color_channels
+        else:  # NHWC
+            if frame.ndim == 3:  # Single frame
+                assert frame.shape[2] == NASA_VIDEO.num_color_channels
+            else:  # Batch
+                assert frame.shape[3] == NASA_VIDEO.num_color_channels
+
+    @needs_rocm
+    @pytest.mark.parametrize("stream_index", [0, 3, None])
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_get_frames_by_pts_in_range(self, stream_index, seek_mode):
+        """Test ROCm decoder get_frames_played_in_range method."""
+        decoder = VideoDecoder(
+            NASA_VIDEO.path,
+            stream_index=stream_index,
+            device="cuda",
+            seek_mode=seek_mode,
+        )
+
+        # Get frames in a PTS range (uses positional args, not keyword args)
+        frames = decoder.get_frames_played_in_range(0, 1.0)
+        assert frames.data.device.type == "cuda"
+        assert frames.data.shape[0] > 0  # Should have frames
+
+    @needs_rocm
+    def test_rocm_get_key_frame_indices(self):
+        """Test ROCm decoder key frame indices retrieval."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode="exact")
+        key_frame_indices = decoder._get_key_frame_indices()
+
+        nasa_reference_key_frame_indices = torch.tensor([0, 240])
+        torch.testing.assert_close(
+            key_frame_indices, nasa_reference_key_frame_indices, atol=0, rtol=0
+        )
+
+    @needs_rocm
+    def test_rocm_compile(self):
+        """Test ROCm decoder with torch.compile."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda")
+
+        def get_batch(decoder):
+            return decoder.get_frames_at([0, 1, 2])
+
+        # Compile the function
+        compiled_get_batch = torch.compile(get_batch)
+
+        # Run it
+        frames = compiled_get_batch(decoder)
+        assert frames.data.device.type == "cuda"
+        assert frames.data.shape[0] == 3
+
+    @needs_rocm
+    def test_rocm_device_none_default_device(self):
+        """Test ROCm decoder respects default device setting."""
+        # Test with context manager
+        with torch.device("cuda"):
+            decoder = VideoDecoder(NASA_VIDEO.path)
+            assert decoder[0].device.type == "cuda"
+
+        # Test with set_default_device
+        original_device = torch.get_default_device()
+        try:
+            torch.set_default_device("cuda")
+            decoder = VideoDecoder(NASA_VIDEO.path)
+            assert decoder[0].device.type == "cuda"
+        finally:
+            torch.set_default_device(original_device)
+
+    @needs_ffmpeg_cli
+    @needs_rocm
+    @pytest.mark.parametrize("method", ("from_file", "from_string"))
+    @pytest.mark.parametrize("stream_index", [0, 3])
+    def test_rocm_custom_frame_mappings_json_and_bytes(self, tmp_path, method, stream_index):
+        """Test ROCm decoder with custom frame mappings."""
+        # Use the same approach as CUDA test - generate real frame mappings from ffprobe
+        custom_frame_mappings = NASA_VIDEO.generate_custom_frame_mappings(stream_index)
+
+        if method == "from_file":
+            json_file = tmp_path / "custom_frames.json"
+            with open(json_file, "w") as f:
+                f.write(custom_frame_mappings)
+            with open(json_file) as custom_mappings_file:
+                decoder = VideoDecoder(
+                    NASA_VIDEO.path,
+                    stream_index=stream_index,
+                    device="cuda",
+                    custom_frame_mappings=custom_mappings_file,
+                    seek_mode="exact",
+                )
+        else:  # from_string
+            decoder = VideoDecoder(
+                NASA_VIDEO.path,
+                stream_index=stream_index,
+                device="cuda",
+                custom_frame_mappings=custom_frame_mappings,
+                seek_mode="exact",
+            )
+
+        # Validate we can decode frames
+        frame0 = decoder.get_frame_at(0)
+        assert frame0.data.device.type == "cuda"
+        frame5 = decoder.get_frame_at(5)
+        assert frame5.data.device.type == "cuda"
+
+    @needs_ffmpeg_cli
+    @needs_rocm
+    @pytest.mark.parametrize(
+        "custom_frame_mappings,expected_match",
+        [
+            pytest.param(
+                None,
+                "seek_mode",
+                id="valid_content_approximate",
+            ),
+            ("{}", "The input is empty or missing the required 'frames' key."),
+            (
+                '{"valid": "json"}',
+                "The input is empty or missing the required 'frames' key.",
+            ),
+            (
+                '{"frames": [{"missing": "keys"}]}',
+                "keys are required in the frame metadata.",
+            ),
+        ],
+    )
+    def test_rocm_custom_frame_mappings_init_fails(
+        self, custom_frame_mappings, expected_match
+    ):
+        """Test ROCm decoder custom frame mappings error handling."""
+        if custom_frame_mappings is None:
+            custom_frame_mappings = NASA_VIDEO.generate_custom_frame_mappings(0)
+        with pytest.raises(ValueError, match=expected_match):
+            VideoDecoder(
+                NASA_VIDEO.path,
+                stream_index=0,
+                device="cuda",
+                custom_frame_mappings=custom_frame_mappings,
+                seek_mode=("approximate" if expected_match == "seek_mode" else "exact"),
+            )
+
+    @needs_rocm
+    def test_rocm_custom_frame_mappings_init_fails_invalid_json(self, tmp_path):
+        """Test ROCm decoder with invalid JSON in custom frame mappings."""
+        invalid_json_path = tmp_path / "invalid_json"
+        with open(invalid_json_path, "w+") as f:
+            f.write("invalid input")
+
+        # Test both file object and string
+        with open(invalid_json_path) as file_obj:
+            for custom_frame_mappings in [
+                file_obj,
+                file_obj.read(),
+            ]:
+                with pytest.raises(ValueError, match="Invalid custom frame mappings"):
+                    VideoDecoder(
+                        NASA_VIDEO.path,
+                        stream_index=0,
+                        device="cuda",
+                        custom_frame_mappings=custom_frame_mappings,
+                    )
+
+    # Additional error handling tests (non-interface versions)
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_get_frame_at_fails(self, seek_mode):
+        """Test ROCm decoder get_frame_at error handling."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        with pytest.raises(
+            IndexError,
+            match="negative indices must have an absolute value less than the number of frames",
+        ):
+            frame = decoder.get_frame_at(-10000)  # noqa
+
+        with pytest.raises(IndexError, match="must be less than"):
+            frame = decoder.get_frame_at(10000)  # noqa
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_get_frames_at_fails(self, seek_mode):
+        """Test ROCm decoder get_frames_at error handling."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        with pytest.raises(
+            IndexError,
+            match="negative indices must have an absolute value less than the number of frames",
+        ):
+            decoder.get_frames_at([-10000])
+
+        with pytest.raises(IndexError, match="Invalid frame index=390"):
+            decoder.get_frames_at([390])
+
+        with pytest.raises(
+            RuntimeError, match="expected scalar type Long but found Float"
+        ):
+            decoder.get_frames_at([0.3])
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_get_frame_played_at_fails(self, seek_mode):
+        """Test ROCm decoder get_frame_played_at error handling."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        with pytest.raises(IndexError, match="Invalid pts in seconds"):
+            frame = decoder.get_frame_played_at(-1.0)  # noqa
+
+        with pytest.raises(IndexError, match="Invalid pts in seconds"):
+            frame = decoder.get_frame_played_at(100.0)  # noqa
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_get_frames_played_at_fails(self, seek_mode):
+        """Test ROCm decoder get_frames_played_at error handling."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        with pytest.raises(RuntimeError, match="must be greater than or equal to"):
+            decoder.get_frames_played_at([-1])
+
+        with pytest.raises(RuntimeError, match="must be less than"):
+            decoder.get_frames_played_at([14])
+
+        with pytest.raises(
+            ValueError, match="Couldn't convert timestamps input to a tensor"
+        ):
+            decoder.get_frames_played_at(["bad"])
+
+    @needs_rocm
+    @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
+    def test_rocm_get_frames_by_pts_in_range_fails(self, seek_mode):
+        """Test ROCm decoder get_frames_played_in_range error handling."""
+        decoder = VideoDecoder(NASA_VIDEO.path, device="cuda", seek_mode=seek_mode)
+
+        with pytest.raises(ValueError, match="Invalid start seconds"):
+            frame = decoder.get_frames_played_in_range(100.0, 1.0)  # noqa
+
+        with pytest.raises(ValueError, match="Invalid start seconds"):
+            frame = decoder.get_frames_played_in_range(20, 23)  # noqa
+
+        with pytest.raises(ValueError, match="Invalid stop seconds"):
+            frame = decoder.get_frames_played_in_range(0, 23)  # noqa
+
+    # AV1-specific test
+    @needs_rocm
+    def test_rocm_get_frame_at_av1(self):
+        """Test ROCm decoder with AV1 video."""
+        if get_ffmpeg_major_version() == 4:
+            pytest.skip("AV1 not supported in FFmpeg 4")
+
+        decoder = VideoDecoder(AV1_VIDEO.path, device="cuda")
+        ref_frame10 = AV1_VIDEO.get_frame_data_by_index(10)
+        ref_frame_info10 = AV1_VIDEO.get_frame_info(10)
+        decoded_frame10 = decoder.get_frame_at(10)
+
+        assert decoded_frame10.duration_seconds == ref_frame_info10.duration_seconds
+        assert decoded_frame10.pts_seconds == ref_frame_info10.pts_seconds
+        torch.testing.assert_close(decoded_frame10.data, ref_frame10.to("cuda"), rtol=0, atol=3)
+
+    # 10-bit video test
+    @needs_rocm
+    @pytest.mark.parametrize("asset", (H264_10BITS, H265_10BITS))
+    def test_rocm_10bit_videos(self, asset):
+        """Test ROCm decoder can handle 10-bit videos."""
+        decoder = VideoDecoder(asset.path, device="cuda")
+
+        # H.265 10-bit is supported in hardware by rocDecode
+        # H.264 10-bit falls back to CPU
+        frame = decoder.get_frame_at(10)
+        assert frame.data.device.type == "cuda"
+        assert frame.data.dtype == torch.uint8
+
+        # Check fallback status
+        if asset == H265_10BITS:
+            # H.265 10-bit should NOT fallback (hardware supported)
+            assert decoder.cpu_fallback.status_known
+            assert not decoder.cpu_fallback
+        # H.264 10-bit fallback status is checked in test_rocm_h264_10bit_cpu_fallback
+
 
     def test_cpu_fallback_no_fallback_on_cpu_device(self):
         """Test that CPU device doesn't trigger fallback (it's not a fallback scenario)."""

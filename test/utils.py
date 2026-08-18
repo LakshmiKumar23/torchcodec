@@ -55,6 +55,13 @@ def needs_cuda(test_item):
     return pytest.mark.needs_cuda(test_item)
 
 
+# Decorator for skipping ROCm tests when ROCm isn't available. The tests are
+# effectively marked to be skipped in pytest_collection_modifyitems() of
+# conftest.py
+def needs_rocm(test_item):
+    return pytest.mark.needs_rocm(test_item)
+
+
 # Decorator for skipping ffmpeg tests when ffmpeg cli isn't available. The tests are
 # effectively marked to be skipped in pytest_collection_modifyitems() of
 # conftest.py
@@ -119,6 +126,10 @@ def cuda_devices():
     )
 
 
+def rocm_devices():
+    return (pytest.param("cuda", marks=pytest.mark.needs_rocm),)
+
+
 def unsplit_device_str(device_str: str) -> str:
     # helper meant to be used as
     # device, device_variant = unsplit_device_str(device)
@@ -175,6 +186,16 @@ def cuda_version_used_for_building_torch() -> tuple[int, int | None]:
         return tuple(int(x) for x in torch.version.cuda.split("."))
 
 
+def rocm_version_used_for_building_torch() -> tuple[int, int] | None:
+    # Return the ROCm version that was used to build PyTorch.
+    # ROCm version format is like "6.2.41134" - we return (major, minor)
+    if not hasattr(torch.version, "hip") or torch.version.hip is None:
+        return None
+    else:
+        version_parts = torch.version.hip.split(".")
+        return tuple(int(x) for x in version_parts[:2])
+
+
 def psnr(a, b, max_val=255) -> float:
     # Return Peak Signal-to-Noise Ratio (PSNR) between two tensors a and b. The
     # higher, the better.
@@ -197,7 +218,14 @@ def psnr(a, b, max_val=255) -> float:
 def assert_frames_equal(*args, **kwargs):
     if sys.platform == "linux" and "x86" in platform.machine().lower():
         if args[0].device.type == "cuda":
-            atol = 3 if cuda_version_used_for_building_torch() >= (13, 0) else 2
+            # Determine tolerance based on CUDA/ROCm version
+            cuda_version = cuda_version_used_for_building_torch()
+            if cuda_version is not None:
+                atol = 3 if cuda_version >= (13, 0) else 2
+            else:
+                # ROCm case - use tolerance of 3 like CUDA 13+
+                atol = 3
+            
             if ffmpeg_major_version == 4:
                 assert_tensor_close_on_at_least(
                     args[0], args[1], percentage=95, atol=atol
