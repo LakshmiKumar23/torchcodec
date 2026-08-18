@@ -24,15 +24,10 @@ bool loadRocDecodeLibrary() {
 
 #include <torch/types.h>
 #include <cstdio>
+#include <dlfcn.h>
 #include <mutex>
 
-#if defined(WIN64) || defined(_WIN64)
-#include <windows.h>
-typedef HMODULE tHandle;
-#else
-#include <dlfcn.h>
 typedef void* tHandle;
-#endif
 
 namespace facebook::torchcodec {
 
@@ -93,26 +88,11 @@ bool isLoaded() {
 
 template <typename T>
 T* bindFunction(const char* functionName) {
-#if defined(WIN64) || defined(_WIN64)
-  return reinterpret_cast<T*>(GetProcAddress(g_rocdecode_handle, functionName));
-#else
   return reinterpret_cast<T*>(dlsym(g_rocdecode_handle, functionName));
-#endif
 }
 
 bool _loadLibrary() {
-  // Helper that just calls dlopen or equivalent on Windows.
-#if defined(WIN64) || defined(_WIN64)
-#ifdef UNICODE
-  static LPCWSTR rocdecodeDll = L"rocdecode.dll";
-#else
-  static LPCSTR rocdecodeDll = "rocdecode.dll";
-#endif
-  g_rocdecode_handle = LoadLibrary(rocdecodeDll);
-  if (g_rocdecode_handle == nullptr) {
-    return false;
-  }
-#else
+  // Helper that calls dlopen to load the rocDecode library.
   g_rocdecode_handle = dlopen("librocdecode.so", RTLD_NOW);
   if (g_rocdecode_handle == nullptr) {
     g_rocdecode_handle = dlopen("librocdecode.so.1", RTLD_NOW);
@@ -120,7 +100,6 @@ bool _loadLibrary() {
   if (g_rocdecode_handle == nullptr) {
     return false;
   }
-#endif
 
   return true;
 }

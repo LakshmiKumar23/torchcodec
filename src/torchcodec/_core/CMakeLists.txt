@@ -1,11 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
 project(TorchCodec)
 set(CMAKE_CXX_STANDARD 17)
-# Enable HIP language support if building with ROCm
-# TODO:This can be removed once we remove the hip kernels and use RPP instead.
-if(ENABLE_ROCM)
-    enable_language(HIP)
-endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(PYBIND11_FINDPYTHON ON)

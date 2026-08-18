@@ -251,8 +251,10 @@ format you want. Refer to AMD's GPU support documentation for more details.
 
    You'll need the following ROCm components installed:
    - AMD's ROCm stack - [TheRock](https://github.com/ROCm/TheRock)
-   - [rocDecode](https://github.com/ROCm/rocm-systems/tree/develop/projects/rocdecode): AMD's video decode library - available as part of TheRock
-   - RPP (ROCm Performance Primitives) version 3.1.2 and above: For image processing
+   - [rocDecode](https://rocm.docs.amd.com/projects/rocDecode/): AMD's hardware video decode library
+   - [RPP](https://rocm.docs.amd.com/projects/rpp/) (ROCm Performance Primitives): For GPU-accelerated image processing
+   
+   Both are included in TheRock (ROCm SDK) installations.
    - HIP runtime
 
    These are typically included in the standard ROCm installation.
