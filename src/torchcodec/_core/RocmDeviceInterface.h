@@ -35,7 +35,7 @@ namespace facebook::torchcodec {
 
 class RocmDeviceInterface : public DeviceInterface {
  public:
-  explicit RocmDeviceInterface(const torch::Device& device);
+  explicit RocmDeviceInterface(const StableDevice& device);
   virtual ~RocmDeviceInterface();
 
   void initialize(
@@ -46,7 +46,7 @@ class RocmDeviceInterface : public DeviceInterface {
   void convertAVFrameToFrameOutput(
       UniqueAVFrame& avFrame,
       FrameOutput& frameOutput,
-      std::optional<torch::Tensor> preAllocatedOutputTensor) override;
+      std::optional<torch::stable::Tensor> preAllocatedOutputTensor) override;
 
   int sendPacket(ReferenceAVPacket& packet) override;
   int sendEOFPacket() override;

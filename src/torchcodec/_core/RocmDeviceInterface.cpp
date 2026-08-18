@@ -5,7 +5,6 @@
 // LICENSE file in the root directory of this source tree.
 
 #include <hip/hip_runtime.h>
-#include <torch/types.h>
 #include <mutex>
 
 #include "RocmDeviceInterface.h"
@@ -26,9 +25,9 @@ namespace {
 // Note: ROCm uses torch::kCUDA device type (PyTorch uses "cuda" for both NVIDIA and AMD).
 // This doesn't conflict with CUDA's default variant because ENABLE_CUDA and ENABLE_ROCM
 // are mutually exclusive build flags - only one backend is compiled at a time.
-static bool g_rocm = registerDeviceInterface(
-    DeviceInterfaceKey(torch::kCUDA),  // Uses default variant "ffmpeg"
-    [](const torch::Device& device) {
+static bool g_rocm = register_device_interface(
+    DeviceInterfaceKey(c10::kCUDA),  // Uses default variant "ffmpeg"
+    [](const StableDevice& device) {
       return new RocmDeviceInterface(device);
     });
 
@@ -84,7 +83,7 @@ static UniqueRocDecDecoder createDecoder(RocdecVideoFormat* videoFormat) {
   
   rocDecStatus result = rocDecCreateDecoder(decoder, &decoderParams);
   
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       result == ROCDEC_SUCCESS, 
       "Failed to create rocDecode decoder. Status: ", result,
       ". This may indicate that rocDecode is not properly installed or ",
@@ -109,7 +108,7 @@ std::optional<rocDecVideoCodec> validateCodecSupport(AVCodecID codecId) {
 
 std::optional<rocDecVideoChromaFormat> validateChromaSupport(
     const AVPixFmtDescriptor* desc) {
-  TORCH_CHECK(desc != nullptr, "desc can't be null");
+  STD_TORCH_CHECK(desc != nullptr, "desc can't be null");
 
   if (desc->nb_components == 1) {
     return rocDecVideoChromaFormat_Monochrome;
@@ -176,21 +175,21 @@ bool nativeRocDecodeSupport(const SharedAVCodecContext& codecContext) {
 
 } // namespace
 
-RocmDeviceInterface::RocmDeviceInterface(const torch::Device& device)
+RocmDeviceInterface::RocmDeviceInterface(const StableDevice& device)
     : DeviceInterface(device) {
-  TORCH_CHECK(g_rocm, "RocmDeviceInterface was not registered!");
-  TORCH_CHECK(
-      device_.type() == torch::kCUDA, "Unsupported device: ", device_.str());
+  STD_TORCH_CHECK(g_rocm, "RocmDeviceInterface was not registered!");
+  STD_TORCH_CHECK(
+      device_.type() == c10::kCUDA, "Unsupported device: must be CUDA (for ROCm)");
 
   // Get the actual device index (handles -1 case by querying current device)
   int deviceIndex = getDeviceIndex(device_);
   
   // Update device_ to have the explicit index
-  device_ = torch::Device(device_.type(), deviceIndex);
+  device_ = StableDevice(device_.type(), deviceIndex);
 
   // Set HIP device before initializing PyTorch context
   hipError_t err = hipSetDevice(deviceIndex);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess,
       "Failed to set HIP device ",
       deviceIndex,
@@ -199,7 +198,7 @@ RocmDeviceInterface::RocmDeviceInterface(const torch::Device& device)
 
   // Create a persistent HIP stream for async memory operations
   err = hipStreamCreate(&rocdecStream_);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess,
       "Failed to create HIP stream: ",
       hipGetErrorString(err));
@@ -219,7 +218,7 @@ RocmDeviceInterface::~RocmDeviceInterface() {
 
     // Set the device before accessing cache to ensure HIP context is valid
     hipError_t hipErr = hipSetDevice(static_cast<int>(device_.index()));
-    TORCH_CHECK(
+    STD_TORCH_CHECK(
         hipErr == hipSuccess,
         "hipSetDevice failed in ~RocmDeviceInterface (before returnDecoder): ",
         hipGetErrorString(hipErr));
@@ -234,7 +233,7 @@ RocmDeviceInterface::~RocmDeviceInterface() {
 
   if (rppCtx_) {
     hipError_t hipErr = hipSetDevice(static_cast<int>(device_.index()));
-    TORCH_CHECK(
+    STD_TORCH_CHECK(
         hipErr == hipSuccess,
         "hipSetDevice failed in ~RocmDeviceInterface (before returnRppStreamContextToCache): ",
         hipGetErrorString(hipErr));
@@ -243,7 +242,7 @@ RocmDeviceInterface::~RocmDeviceInterface() {
 
   if (rocdecStream_) {
     hipError_t hipErr = hipStreamDestroy(rocdecStream_);
-    TORCH_CHECK(
+    STD_TORCH_CHECK(
         hipErr == hipSuccess,
         "hipStreamDestroy failed in ~RocmDeviceInterface: ",
         hipGetErrorString(hipErr));
@@ -270,8 +269,8 @@ void RocmDeviceInterface::initialize(
   }
 
   if (!nativeRocDecodeSupport(codecContext)) {
-    cpuFallback_ = createDeviceInterface(torch::kCPU);
-    TORCH_CHECK(
+    cpuFallback_ = create_device_interface(c10::kCPU);
+    STD_TORCH_CHECK(
         cpuFallback_ != nullptr, "Failed to create CPU device interface");
     cpuFallback_->initialize(avStream, avFormatCtx, codecContext);
     cpuFallback_->initializeVideo(
@@ -279,19 +278,19 @@ void RocmDeviceInterface::initialize(
     return;
   }
 
-  TORCH_CHECK(avStream != nullptr, "AVStream cannot be null");
+  STD_TORCH_CHECK(avStream != nullptr, "AVStream cannot be null");
   timeBase_ = avStream->time_base;
   frameRateAvgFromFFmpeg_ = avStream->r_frame_rate;
 
   const AVCodecParameters* codecPar = avStream->codecpar;
-  TORCH_CHECK(codecPar != nullptr, "CodecParameters cannot be null");
+  STD_TORCH_CHECK(codecPar != nullptr, "CodecParameters cannot be null");
 
   initializeBSF(codecPar, avFormatCtx);
 
   // Create parser
   RocdecParserParams parserParams = {};
   auto codecType = validateCodecSupport(codecPar->codec_id);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       codecType.has_value(),
       "This should never happen, we should be using the CPU fallback by now.");
   parserParams.codec_type = codecType.value();
@@ -306,7 +305,7 @@ void RocmDeviceInterface::initialize(
 
   rocDecStatus result = rocDecCreateVideoParser(&videoParser_, &parserParams);
   
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       result == ROCDEC_SUCCESS, 
       "Failed to create rocDecode video parser. Status: ", result);
 }
@@ -314,9 +313,9 @@ void RocmDeviceInterface::initialize(
 void RocmDeviceInterface::initializeBSF(
     const AVCodecParameters* codecPar,
     const UniqueDecodingAVFormatContext& avFormatCtx) {
-  TORCH_CHECK(codecPar != nullptr, "codecPar cannot be null");
-  TORCH_CHECK(avFormatCtx != nullptr, "AVFormatContext cannot be null");
-  TORCH_CHECK(
+  STD_TORCH_CHECK(codecPar != nullptr, "codecPar cannot be null");
+  STD_TORCH_CHECK(avFormatCtx != nullptr, "AVFormatContext cannot be null");
+  STD_TORCH_CHECK(
       avFormatCtx->iformat != nullptr,
       "AVFormatContext->iformat cannot be null");
   std::string filterName;
@@ -357,35 +356,35 @@ void RocmDeviceInterface::initializeBSF(
   }
 
   const AVBitStreamFilter* avBSF = av_bsf_get_by_name(filterName.c_str());
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       avBSF != nullptr, "Failed to find bitstream filter: ", filterName);
 
   AVBSFContext* avBSFContext = nullptr;
   int retVal = av_bsf_alloc(avBSF, &avBSFContext);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       retVal >= AVSUCCESS,
       "Failed to allocate bitstream filter: ",
-      getFFMPEGErrorStringFromErrorCode(retVal));
+      get_ffmpeg_error_string_from_error_code(retVal));
 
   bitstreamFilter_.reset(avBSFContext);
 
   retVal = avcodec_parameters_copy(bitstreamFilter_->par_in, codecPar);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       retVal >= AVSUCCESS,
       "Failed to copy codec parameters: ",
-      getFFMPEGErrorStringFromErrorCode(retVal));
+      get_ffmpeg_error_string_from_error_code(retVal));
 
   retVal = av_bsf_init(bitstreamFilter_.get());
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       retVal == AVSUCCESS,
       "Failed to initialize bitstream filter: ",
-      getFFMPEGErrorStringFromErrorCode(retVal));
+      get_ffmpeg_error_string_from_error_code(retVal));
 }
 
 int RocmDeviceInterface::handleVideoSequence(
     RocdecVideoFormat* videoFormat) {
   
-  TORCH_CHECK(videoFormat != nullptr, "Invalid video format");
+  STD_TORCH_CHECK(videoFormat != nullptr, "Invalid video format");
 
   videoFormat_ = *videoFormat;
 
@@ -401,7 +400,7 @@ int RocmDeviceInterface::handleVideoSequence(
     } else {
     }
 
-    TORCH_CHECK(decoder_, "Failed to get or create decoder");
+    STD_TORCH_CHECK(decoder_, "Failed to get or create decoder");
   }
 
   return static_cast<int>(videoFormat_.min_num_decode_surfaces);
@@ -413,7 +412,7 @@ int RocmDeviceInterface::sendPacket(ReferenceAVPacket& packet) {
     return cpuFallback_->sendPacket(packet);
   }
 
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       packet.get() && packet->data && packet->size > 0,
       "sendPacket received an empty packet");
 
@@ -457,24 +456,24 @@ ReferenceAVPacket& RocmDeviceInterface::applyBSF(
   }
 
   int retVal = av_bsf_send_packet(bitstreamFilter_.get(), packet.get());
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       retVal >= AVSUCCESS,
       "Failed to send packet to bitstream filter: ",
-      getFFMPEGErrorStringFromErrorCode(retVal));
+      get_ffmpeg_error_string_from_error_code(retVal));
 
   retVal = av_bsf_receive_packet(bitstreamFilter_.get(), filteredPacket.get());
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       retVal >= AVSUCCESS,
       "Failed to receive packet from bitstream filter: ",
-      getFFMPEGErrorStringFromErrorCode(retVal));
+      get_ffmpeg_error_string_from_error_code(retVal));
 
   return filteredPacket;
 }
 
 int RocmDeviceInterface::handlePictureDecode(RocdecPicParams* picParams) {
   
-  TORCH_CHECK(picParams != nullptr, "Invalid picture parameters");
-  TORCH_CHECK(decoder_, "Decoder not initialized before picture decode");
+  STD_TORCH_CHECK(picParams != nullptr, "Invalid picture parameters");
+  STD_TORCH_CHECK(decoder_, "Decoder not initialized before picture decode");
   
   rocDecStatus result = rocDecDecodeFrame(*decoder_.get(), picParams);
   
@@ -528,16 +527,16 @@ UniqueAVFrame RocmDeviceInterface::convertRocmFrameToAVFrame(
     unsigned int pitch,
     const RocdecParserDispInfo& dispInfo) {
   
-  TORCH_CHECK(framePtr != nullptr, "Invalid ROCm frame pointer");
+  STD_TORCH_CHECK(framePtr != nullptr, "Invalid ROCm frame pointer");
 
   int width = videoFormat_.display_area.right - videoFormat_.display_area.left;
   int height = videoFormat_.display_area.bottom - videoFormat_.display_area.top;
   
-  TORCH_CHECK(width > 0 && height > 0, "Invalid frame dimensions");
-  TORCH_CHECK(pitch >= static_cast<unsigned int>(width), "Pitch must be >= width");
+  STD_TORCH_CHECK(width > 0 && height > 0, "Invalid frame dimensions");
+  STD_TORCH_CHECK(pitch >= static_cast<unsigned int>(width), "Pitch must be >= width");
 
   UniqueAVFrame avFrame(av_frame_alloc());
-  TORCH_CHECK(avFrame.get() != nullptr, "Failed to allocate AVFrame");
+  STD_TORCH_CHECK(avFrame.get() != nullptr, "Failed to allocate AVFrame");
 
   avFrame->width = width;
   avFrame->height = height;
@@ -547,7 +546,7 @@ UniqueAVFrame RocmDeviceInterface::convertRocmFrameToAVFrame(
 
   //We compute the duration based on average frame rate info, so
   // so if the video has variable frame rate, the durations may be off
-  setDuration(avFrame, computeSafeDuration(frameRateAvgFromFFmpeg_, timeBase_));
+  set_duration(*avFrame, compute_safe_duration(frameRateAvgFromFFmpeg_, timeBase_));
 
   // Set colorspace information
   // rocDecode parses matrix_coefficients from the bitstream, but for some codecs
@@ -638,24 +637,24 @@ UniqueAVFrame RocmDeviceInterface::transferCpuFrameToGpuNV12(
   // This is called in the context of the CPU fallback: the frame was decoded on
   // the CPU, and in this function we convert that frame into NV12 format and
   // send it to the GPU.
-  TORCH_CHECK(cpuFrame != nullptr, "CPU frame cannot be null");
+  STD_TORCH_CHECK(cpuFrame != nullptr, "CPU frame cannot be null");
 
   int width = cpuFrame->width;
   int height = cpuFrame->height;
 
   // Convert to NV12 first
   UniqueAVFrame nv12CpuFrame(av_frame_alloc());
-  TORCH_CHECK(nv12CpuFrame != nullptr, "Failed to allocate NV12 CPU frame");
+  STD_TORCH_CHECK(nv12CpuFrame != nullptr, "Failed to allocate NV12 CPU frame");
 
   nv12CpuFrame->format = AV_PIX_FMT_NV12;
   nv12CpuFrame->width = width;
   nv12CpuFrame->height = height;
 
   int ret = av_frame_get_buffer(nv12CpuFrame.get(), 0);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       ret >= 0,
       "Failed to allocate NV12 CPU frame buffer: ",
-      getFFMPEGErrorStringFromErrorCode(ret));
+      get_ffmpeg_error_string_from_error_code(ret));
 
   SwsFrameContext swsFrameContext(
       width,
@@ -668,7 +667,7 @@ UniqueAVFrame RocmDeviceInterface::transferCpuFrameToGpuNV12(
     // Use swsFlags=0 (point sampling) instead of SWS_BILINEAR to better match
     // the direct CPU decoding path, which also uses swsFlags=0.
     // This reduces color conversion differences when comparing CPU fallback against direct CPU.
-    swsContext_ = createSwsContext(
+    swsContext_ = create_sws_context(
         swsFrameContext, cpuFrame->colorspace, AV_PIX_FMT_NV12, 0);
     prevSwsFrameContext_ = swsFrameContext;
   }
@@ -681,7 +680,7 @@ UniqueAVFrame RocmDeviceInterface::transferCpuFrameToGpuNV12(
       height,
       nv12CpuFrame->data,
       nv12CpuFrame->linesize);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       convertedHeight == height, "sws_scale failed for CPU->NV12 conversion");
 
   // Allocate GPU memory and copy
@@ -691,11 +690,11 @@ UniqueAVFrame RocmDeviceInterface::transferCpuFrameToGpuNV12(
 
   uint8_t* hipBuffer = nullptr;
   hipError_t err = hipMalloc(reinterpret_cast<void**>(&hipBuffer), totalSize);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess, "Failed to allocate HIP memory: ", hipGetErrorString(err));
 
   UniqueAVFrame gpuFrame(av_frame_alloc());
-  TORCH_CHECK(gpuFrame != nullptr, "Failed to allocate GPU AVFrame");
+  STD_TORCH_CHECK(gpuFrame != nullptr, "Failed to allocate GPU AVFrame");
 
   gpuFrame->format = AV_PIX_FMT_NV12;  // Use NV12 format for ROCm
   gpuFrame->width = width;
@@ -713,10 +712,10 @@ UniqueAVFrame RocmDeviceInterface::transferCpuFrameToGpuNV12(
       width,
       height,
       hipMemcpyHostToDevice);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess, "Failed to copy Y plane to GPU: ", hipGetErrorString(err));
 
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
         height % 2 == 0,
         "height must be even. Please report on TorchCodec repo.");
   err = hipMemcpy2D(
@@ -727,28 +726,28 @@ UniqueAVFrame RocmDeviceInterface::transferCpuFrameToGpuNV12(
       width,
       height / 2,
       hipMemcpyHostToDevice);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess, "Failed to copy UV plane to GPU: ", hipGetErrorString(err));
 
   ret = av_frame_copy_props(gpuFrame.get(), cpuFrame.get());
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       ret >= 0,
       "Failed to copy frame properties: ",
-      getFFMPEGErrorStringFromErrorCode(ret));
+      get_ffmpeg_error_string_from_error_code(ret));
 
   gpuFrame->opaque_ref = av_buffer_create(
       nullptr,
       0,
       [](void* opaque, [[maybe_unused]] uint8_t* data) {
         hipError_t hipErr = hipFree(opaque);
-        TORCH_CHECK(
+        STD_TORCH_CHECK(
             hipErr == hipSuccess,
             "hipFree failed in transferCpuFrameToGpuNV12 buffer free: ",
             hipGetErrorString(hipErr));
       },
       hipBuffer,
       0);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       gpuFrame->opaque_ref != nullptr,
       "Failed to create GPU memory cleanup reference");
 
@@ -762,7 +761,7 @@ void RocmDeviceInterface::convertAVFrameToFrameOutput(
   UniqueAVFrame gpuFrame =
       cpuFallback_ ? transferCpuFrameToGpuNV12(avFrame) : std::move(avFrame);
 
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       gpuFrame->format == AV_PIX_FMT_NV12,
       "Expected NV12 frame from rocDecode (hardware path), got format: ",
       gpuFrame->format);
@@ -776,7 +775,7 @@ void RocmDeviceInterface::convertAVFrameToFrameOutput(
   // Synchronize the RPP stream to ensure color conversion completes
   // before the gpuFrame (NV12 buffer) is destroyed
   hipError_t err = hipStreamSynchronize(rppCtx_->stream);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess,
       "Failed to synchronize RPP stream: ",
       hipGetErrorString(err));

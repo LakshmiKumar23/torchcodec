@@ -56,25 +56,26 @@ PerGpuCache<RppContext, RppContextDeleter> g_cached_rpp_ctxs(
 
 } // namespace
 
-void initializeRocmContextWithPytorch(const torch::Device& device) {
+void initializeRocmContextWithPytorch(const StableDevice& device) {
   // It is important for pytorch itself to create the HIP context. If ffmpeg
   // creates the context it may not be compatible with pytorch.
   // This is a dummy tensor to initialize the HIP context.
-  torch::Tensor dummyTensorForHipInitialization = torch::zeros(
-      {1}, torch::TensorOptions().dtype(torch::kUInt8).device(device));
+  torch::stable::Tensor dummyTensorForHipInitialization =
+      torch::stable::empty({1}, kStableUInt8, std::nullopt, device);
+  torch::stable::zero_(dummyTensorForHipInitialization);
 }
 
-torch::Tensor convertNV12FrameToRGB(
+torch::stable::Tensor convertNV12FrameToRGB(
     UniqueAVFrame& avFrame,
-    const torch::Device& device,
+    const StableDevice& device,
     const UniqueRppContext& rppCtx,
     hipStream_t rocdecStream,
     ChromaUpsampling chromaUpsampling,
-    std::optional<torch::Tensor> preAllocatedOutputTensor) {
+    std::optional<torch::stable::Tensor> preAllocatedOutputTensor) {
 
   auto frameDims = FrameDims(avFrame->height, avFrame->width);
   
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       avFrame->format == AV_PIX_FMT_NV12,
       "convertNV12FrameToRGB on ROCm expects NV12 (AV_PIX_FMT_NV12); "
       "rppt_yuv_to_rgb is 8-bit only. Got format: ",
@@ -85,14 +86,14 @@ torch::Tensor convertNV12FrameToRGB(
       avFrame->format,
       ")");
 
-  torch::Tensor dst;
+  torch::stable::Tensor dst;
   if (preAllocatedOutputTensor.has_value()) {
     dst = preAllocatedOutputTensor.value();
-    TORCH_CHECK(
-        dst.scalar_type() == torch::kUInt8,
+    STD_TORCH_CHECK(
+        dst.scalar_type() == kStableUInt8,
         "ROCm NV12→RGB requires a uint8 HWC output tensor.");
   } else {
-    dst = allocateEmptyHWCTensor(frameDims, device);
+    dst = allocate_empty_hwc_tensor(frameDims, device);
   }
 
   // We need to make sure rocDecode has finished decoding a frame before
@@ -102,31 +103,31 @@ torch::Tensor convertNV12FrameToRGB(
   
   hipEvent_t rocdecodeDoneEvent;
   hipError_t err = hipEventCreate(&rocdecodeDoneEvent);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess,
       "hipEventCreate failed: ",
       hipGetErrorString(err));
   
   err = hipEventRecord(rocdecodeDoneEvent, rocdecStream);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess,
       "hipEventRecord failed: ",
       hipGetErrorString(err));
   
   err = hipStreamWaitEvent(rppStream, rocdecodeDoneEvent, 0);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess,
       "hipStreamWaitEvent failed: ",
       hipGetErrorString(err));
   
   err = hipEventDestroy(rocdecodeDoneEvent);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess,
       "hipEventDestroy failed: ",
       hipGetErrorString(err));
 
   err = hipStreamGetFlags(rppCtx->stream, &rppCtx->streamFlags);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess,
       "hipStreamGetFlags failed: ",
       hipGetErrorString(err));
@@ -136,7 +137,7 @@ torch::Tensor convertNV12FrameToRGB(
 
   rppStatus_t setStreamStatus =
       rppSetStream(rppCtx->handle, rppCtx->stream);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       setStreamStatus == rppStatusSuccess,
       "rppSetStream failed. Status: ",
       setStreamStatus);
@@ -217,7 +218,7 @@ torch::Tensor convertNV12FrameToRGB(
       colorRange,
       rppCtx->handle,
       RPP_HIP_BACKEND);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       status == RPP_SUCCESS,
       "Failed to convert NV12 to RGB (",
       modeName,
@@ -226,7 +227,7 @@ torch::Tensor convertNV12FrameToRGB(
   return dst;
 }
 
-UniqueRppContext getRppStreamContext(const torch::Device& device) {
+UniqueRppContext getRppStreamContext(const StableDevice& device) {
   [[maybe_unused]] int deviceIndex = getDeviceIndex(device);
 
   UniqueRppContext rppCtx = g_cached_rpp_ctxs.get(device);
@@ -241,7 +242,7 @@ UniqueRppContext getRppStreamContext(const torch::Device& device) {
   int batchSize = 1;
 
   hipError_t err = hipStreamCreate(&ctx->stream);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       err == hipSuccess,
       "Failed to create HIP stream: ",
       hipGetErrorString(err));
@@ -252,7 +253,7 @@ UniqueRppContext getRppStreamContext(const torch::Device& device) {
       0,  // numThreads = 0 for HIP backend
       ctx->stream,
       RPP_HIP_BACKEND);
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       status == rppStatusSuccess,
       "Failed to create RPP handle. Status: ",
       status);
@@ -262,10 +263,10 @@ UniqueRppContext getRppStreamContext(const torch::Device& device) {
 }
 
 void returnRppStreamContextToCache(
-    const torch::Device& device,
+    const StableDevice& device,
     UniqueRppContext rppCtx) {
   if (rppCtx) {
-    g_cached_rpp_ctxs.addIfCacheHasCapacity(device, std::move(rppCtx));
+    g_cached_rpp_ctxs.add_if_cache_has_capacity(device, std::move(rppCtx));
   }
 }
 
@@ -278,7 +279,7 @@ void validatePreAllocatedTensorShape(
 
   if (preAllocatedOutputTensor.has_value()) {
     auto shape = preAllocatedOutputTensor.value().sizes();
-    TORCH_CHECK(
+    STD_TORCH_CHECK(
         (shape.size() == 3) && (shape[0] == frameDims.height) &&
             (shape[1] == frameDims.width) && (shape[2] == 3),
         "Expected tensor of shape ",
@@ -290,17 +291,17 @@ void validatePreAllocatedTensorShape(
   }
 }
 
-int getDeviceIndex(const torch::Device& device) {
-  // PyTorch uses int8_t as its torch::DeviceIndex, but FFmpeg and HIP
+int getDeviceIndex(const StableDevice& device) {
+  // PyTorch uses int8_t as its StableDeviceIndex, but FFmpeg and HIP
   // libraries use int. So we use int, too.
   int deviceIndex = static_cast<int>(device.index());
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       deviceIndex >= -1 && deviceIndex < MAX_ROCM_GPUS,
       "Invalid device index = ",
       deviceIndex);
 
   if (deviceIndex == -1) {
-    TORCH_CHECK(
+    STD_TORCH_CHECK(
         hipGetDevice(&deviceIndex) == hipSuccess,
         "Failed to get current HIP device.");
   }

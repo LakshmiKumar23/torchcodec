@@ -19,7 +19,7 @@ extern "C" {
 
 namespace facebook::torchcodec {
 
-RocDecCache& RocDecCache::getCache(const torch::Device& device) {
+RocDecCache& RocDecCache::getCache(const StableDevice& device) {
   static RocDecCache cacheInstances[MAX_ROCM_GPUS];
   return cacheInstances[getDeviceIndex(device)];
 }

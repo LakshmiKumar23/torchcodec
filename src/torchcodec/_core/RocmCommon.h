@@ -18,10 +18,11 @@
 #endif
 #endif
 #include <rpp/rpp.h>
-#include <torch/types.h>
+#include <torch/headeronly/util/Exception.h>
 
 #include "FFMPEGCommon.h"
 #include "Frame.h"
+#include "StableABICompat.h"
 
 extern "C" {
 #include <libavutil/pixdesc.h>
@@ -34,7 +35,7 @@ namespace facebook::torchcodec {
 // PyTorch can handle up to 128 GPUs
 constexpr int MAX_ROCM_GPUS = 128;
 
-void initializeRocmContextWithPytorch(const torch::Device& device);
+void initializeRocmContextWithPytorch(const StableDevice& device);
 
 // ROCm context structure
 struct RppContext {
@@ -52,7 +53,7 @@ struct RppContextDeleter {
       }
       if (ctx->stream) {
         hipError_t status = hipStreamDestroy(ctx->stream);
-        TORCH_CHECK(
+        STD_TORCH_CHECK(
             status == hipSuccess,
             "hipStreamDestroy failed: ",
             hipGetErrorString(status));
@@ -73,23 +74,23 @@ enum class ChromaUpsampling {
   kCubic,           // rppt_yuv_to_rgb_cubic_v: FFmpeg-compatible cubic
 };
 
-torch::Tensor convertNV12FrameToRGB(
+torch::stable::Tensor convertNV12FrameToRGB(
     UniqueAVFrame& avFrame,
-    const torch::Device& device,
+    const StableDevice& device,
     const UniqueRppContext& rppCtx,
     hipStream_t rodecStream,
     ChromaUpsampling chromaUpsampling,
-    std::optional<torch::Tensor> preAllocatedOutputTensor = std::nullopt);
+    std::optional<torch::stable::Tensor> preAllocatedOutputTensor = std::nullopt);
 
-UniqueRppContext getRppStreamContext(const torch::Device& device);
+UniqueRppContext getRppStreamContext(const StableDevice& device);
 void returnRppStreamContextToCache(
-    const torch::Device& device,
+    const StableDevice& device,
     UniqueRppContext rppCtx);
 
 void validatePreAllocatedTensorShape(
-    const std::optional<torch::Tensor>& preAllocatedOutputTensor,
+    const std::optional<torch::stable::Tensor>& preAllocatedOutputTensor,
     const UniqueAVFrame& avFrame);
 
-int getDeviceIndex(const torch::Device& device);
+int getDeviceIndex(const StableDevice& device);
 
 } // namespace facebook::torchcodec

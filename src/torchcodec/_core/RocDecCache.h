@@ -11,10 +11,11 @@
 #include <mutex>
 
 #include <hip/hip_runtime.h>
-#include <torch/types.h>
 
 #include <rocdecode/rocdecode.h>
 #include <rocdecode/rocparser.h>
+
+#include "StableABICompat.h"
 
 namespace facebook::torchcodec {
 
@@ -38,7 +39,7 @@ using UniqueRocDecDecoder =
 // class per GPU device, and it is accessed through the static getCache() method.
 class RocDecCache {
  public:
-  static RocDecCache& getCache(const torch::Device& device);
+  static RocDecCache& getCache(const StableDevice& device);
 
   // Get decoder from cache - returns nullptr if none available
   UniqueRocDecDecoder getDecoder(RocdecVideoFormat* videoFormat);
