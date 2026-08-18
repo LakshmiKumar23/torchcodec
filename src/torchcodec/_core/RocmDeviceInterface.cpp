@@ -552,30 +552,55 @@ UniqueAVFrame RocmDeviceInterface::convertRocmFrameToAVFrame(
   setDuration(avFrame, computeSafeDuration(frameRateAvgFromFFmpeg_, timeBase_));
 
   // Set colorspace information
-  switch (videoFormat_.video_signal_description.matrix_coefficients) {
-    case 1:
-      avFrame->colorspace = AVCOL_SPC_BT709;
-      break;
-    case 6:
-      avFrame->colorspace = AVCOL_SPC_SMPTE170M;
-      break;
-    default:
-      avFrame->colorspace = AVCOL_SPC_SMPTE170M;
-      break;
+  // rocDecode parses matrix_coefficients from the bitstream, but for some codecs
+  // (notably AV1) it may report 0 (unspecified) even when the container has
+  // valid colorspace metadata. In that case, fall back to FFmpeg's codec context.
+  // Per ITU-T specs, both 0 and 2 mean unspecified/reserved.
+  int matrixCoeffs = videoFormat_.video_signal_description.matrix_coefficients;
+
+  if ((matrixCoeffs == 0 || matrixCoeffs == 2) && codecContext_ &&
+      codecContext_->colorspace != AVCOL_SPC_UNSPECIFIED) {
+    // rocDecode reports unspecified, but FFmpeg has valid colorspace from container
+    // Map FFmpeg's AVColorSpace enum to the colorspace we'll use
+    switch (codecContext_->colorspace) {
+      case AVCOL_SPC_BT709:
+        avFrame->colorspace = AVCOL_SPC_BT709;
+        break;
+      case AVCOL_SPC_SMPTE170M:
+      case AVCOL_SPC_BT470BG:
+        avFrame->colorspace = AVCOL_SPC_SMPTE170M;
+        break;
+      default:
+        // Default to SMPTE170M for unknown colorspaces
+        avFrame->colorspace = AVCOL_SPC_SMPTE170M;
+        break;
+    }
+  } else {
+    // Use rocDecode's parsed matrix_coefficients
+    switch (matrixCoeffs) {
+      case 1:
+        avFrame->colorspace = AVCOL_SPC_BT709;
+        break;
+      case 6:
+        avFrame->colorspace = AVCOL_SPC_SMPTE170M;
+        break;
+      default:
+        avFrame->colorspace = AVCOL_SPC_SMPTE170M;
+        break;
+    }
   }
 
   // Set color range from rocDecode's parsed VUI parameters
   // If rocDecode explicitly indicates full range, trust it
   // Otherwise, fall back to container-level metadata from FFmpeg codec context
   // because rocDecode might not have parsed VUI parameters (video_full_range_flag=0 by default)
-  
   if (videoFormat_.video_signal_description.video_full_range_flag) {
     // rocDecode explicitly parsed full range from VUI - trust it
     avFrame->color_range = AVCOL_RANGE_JPEG;  // Full range (0-255)
   } else if (codecContext_) {
     // rocDecode didn't indicate full range - could be:
     // 1. VUI absent from bitstream, OR
-    // 2. VUI present but video_signal_type_present_flag=0, OR  
+    // 2. VUI present but video_signal_type_present_flag=0, OR
     // 3. VUI present and explicitly indicates studio range
     // Fall back to container-level metadata which FFmpeg parses reliably
     avFrame->color_range = codecContext_->color_range;
