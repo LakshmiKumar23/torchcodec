@@ -20,9 +20,9 @@ set -euo pipefail
 install_rocdecode_build_only() {
     dnf install -y "dnf-command(download)" >/dev/null 2>&1 || dnf install -y dnf-plugins-core
     rpm_dir="$(mktemp -d)"
-    dnf download --destdir "${rpm_dir}" rocdecode rocdecode-devel
-    rpm -Uvh --nodeps "${rpm_dir}"/rocdecode*.rpm
+    dnf download --destdir "${rpm_dir}" amdrocm-decode amdrocm-decode-devel
+    rpm -Uvh --nodeps "${rpm_dir}"/amdrocm-decode*.rpm
 }
 
-dnf install -y --refresh rocdecode-devel \
+dnf install -y --refresh amdrocm-decode-devel \
     || install_rocdecode_build_only
