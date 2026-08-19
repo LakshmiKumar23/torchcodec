@@ -610,6 +610,7 @@ UniqueAVFrame RocmDeviceInterface::convertRocmFrameToAVFrame(
     av_frame->color_range = AVCOL_RANGE_MPEG;  // Studio range (16-235)
   }
 
+  // NV12 has only 2 valid planes
   av_frame->data[0] = reinterpret_cast<uint8_t*>(framePtr[0]);
   av_frame->data[1] = reinterpret_cast<uint8_t*>(framePtr[1]);
   av_frame->data[2] = nullptr;

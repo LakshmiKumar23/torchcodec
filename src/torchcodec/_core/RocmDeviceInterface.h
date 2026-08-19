@@ -12,6 +12,84 @@
 // AMD VCN (Video Core Next) Architecture docs:
 // https://rocm.docs.amd.com/projects/rocDecode/en/latest
 
+/* clang-format off */
+// Note: [General design, sendPacket, receiveFrame, frame ordering and rocDecode callbacks]
+//
+// This interface provides hardware-accelerated video decoding on AMD GPUs using
+// rocDecode Library (https://github.com/ROCm/rocm-systems/tree/develop/projects/rocdecode), which provides access to
+// AMD's VCN (Video Core Next) hardware decoder.
+//
+// Architecture Design:
+// 
+// At a high level, this decoding interface mimics the FFmpeg send/receive
+// architecture while using rocDecode for hardware acceleration:
+// - sendPacket(AVPacket) sends an AVPacket from the FFmpeg demuxer to the
+//   rocDecode parser.
+// - receiveFrame(AVFrame) is a non-blocking call:
+//   - if a frame is ready **in display order**, it returns it. By display
+//   order, we mean that receiveFrame() must return frames with increasing pts
+//   values when called successively.
+//   - if no frame is ready, it returns AVERROR(EAGAIN) to indicate the
+//   caller should send more packets.
+//
+// Frame Re-ordering and rocDecode Callbacks:
+// ==========================================
+// SendPacket(AVPacket)'s job is to pass down the packet to the rocDecode
+// parser by calling RocdecParseVideoData(packet). When
+// RocdecParseVideoData(packet) is called, it may trigger callbacks:
+//
+// - handleVideoSequence(videoFormat): triggered once at the start of the
+//   stream, and possibly later if the stream properties change (e.g.
+//   resolution). This is where we create/configure the decoder.
+//
+// - handlePictureDecode(picParams): triggered **in decode order** when the
+//   parser has accumulated enough data to decode a frame. We send that frame to
+//   the VCN hardware for **async** decoding via RocdecDecodeFrame().
+//
+// - handlePictureDisplay(dispInfo): triggered **in display order** when a
+//   frame is ready to be "displayed" (returned). At that point, the parser also
+//   gives us the pts of that frame. We store (a reference to) that frame in a
+//   FIFO queue: readyFrames_.
+//
+// When receiveFrame(AVFrame) is called, if readyFrames_ is not empty, we pop
+// the front of the queue, which is the next frame in display order, and get it
+// from the decoder by calling rocdecGetVideoFrame(). If readyFrames_ is empty we
+// return EAGAIN to indicate the caller should send more packets.
+//
+// Note on Frame Lifetime:
+// =======================
+// We release the previous frame
+// before getting a new one to avoid holding too many frames in decoder memory.
+//
+// Supported Codecs (via AMD VCN hardware):
+// =========================================
+// - H.265 (HEVC) - 8 bit and 10 bit
+// - H.264 (AVC) - 8 bit
+// - AV1 - 8 bit and 10 bit
+// - VP9 - 8 bit and 10 bit
+//
+// Hardware Requirements:
+// ======================
+// - AMD GPU with gfx908 or higher (RDNA 2+, CDNA 2+)
+// - ROCm 7.13.0 or later
+// - libva-amdgpu-dev (VA-API AMD implementation)
+// - mesa-amdgpu-va-drivers
+//
+// Color Conversion:
+// =================
+// Decoded frames are in NV12 format from VCN hardware. We use RPP (ROCm
+// Performance Primitives) for GPU-accelerated NV12->RGB conversion, keeping
+// all data in GPU memory.
+//
+// CPU Fallback:
+// =============
+// If rocDecode is unavailable or the video format is not supported by VCN
+// hardware, we automatically fall back to CPU decoding (similar to NVDEC
+// implementation).
+//
+/* clang-format on */
+
+
 #pragma once
 
 #include "RocmCommon.h"
@@ -118,80 +196,3 @@ class RocmDeviceInterface : public DeviceInterface {
 };
 
 } // namespace facebook::torchcodec
-
-/* clang-format off */
-// Note: [General design, sendPacket, receiveFrame, frame ordering and rocDecode callbacks]
-//
-// This interface provides hardware-accelerated video decoding on AMD GPUs using
-// rocDecode Library (https://github.com/ROCm/rocm-systems/tree/develop/projects/rocdecode), which provides access to
-// AMD's VCN (Video Core Next) hardware decoder.
-//
-// Architecture Design:
-// 
-// At a high level, this decoding interface mimics the FFmpeg send/receive
-// architecture while using rocDecode for hardware acceleration:
-// - sendPacket(AVPacket) sends an AVPacket from the FFmpeg demuxer to the
-//   rocDecode parser.
-// - receiveFrame(AVFrame) is a non-blocking call:
-//   - if a frame is ready **in display order**, it returns it. By display
-//   order, we mean that receiveFrame() must return frames with increasing pts
-//   values when called successively.
-//   - if no frame is ready, it returns AVERROR(EAGAIN) to indicate the
-//   caller should send more packets.
-//
-// Frame Re-ordering and rocDecode Callbacks:
-// ==========================================
-// SendPacket(AVPacket)'s job is to pass down the packet to the rocDecode
-// parser by calling RocdecParseVideoData(packet). When
-// RocdecParseVideoData(packet) is called, it may trigger callbacks:
-//
-// - handleVideoSequence(videoFormat): triggered once at the start of the
-//   stream, and possibly later if the stream properties change (e.g.
-//   resolution). This is where we create/configure the decoder.
-//
-// - handlePictureDecode(picParams): triggered **in decode order** when the
-//   parser has accumulated enough data to decode a frame. We send that frame to
-//   the VCN hardware for **async** decoding via RocdecDecodeFrame().
-//
-// - handlePictureDisplay(dispInfo): triggered **in display order** when a
-//   frame is ready to be "displayed" (returned). At that point, the parser also
-//   gives us the pts of that frame. We store (a reference to) that frame in a
-//   FIFO queue: readyFrames_.
-//
-// When receiveFrame(AVFrame) is called, if readyFrames_ is not empty, we pop
-// the front of the queue, which is the next frame in display order, and get it
-// from the decoder by calling rocdecGetVideoFrame(). If readyFrames_ is empty we
-// return EAGAIN to indicate the caller should send more packets.
-//
-// Note on Frame Lifetime:
-// =======================
-// We release the previous frame
-// before getting a new one to avoid holding too many frames in decoder memory.
-//
-// Supported Codecs (via AMD VCN hardware):
-// =========================================
-// - H.265 (HEVC) - 8 bit and 10 bit
-// - H.264 (AVC) - 8 bit
-// - AV1 - 8 bit and 10 bit
-// - VP9 - 8 bit and 10 bit
-//
-// Hardware Requirements:
-// ======================
-// - AMD GPU with gfx908 or higher (RDNA 2+, CDNA 2+)
-// - ROCm 7.13.0 or later
-// - libva-amdgpu-dev (VA-API AMD implementation)
-// - mesa-amdgpu-va-drivers
-//
-// Color Conversion:
-// =================
-// Decoded frames are in NV12 format from VCN hardware. We use RPP (ROCm
-// Performance Primitives) for GPU-accelerated NV12->RGB conversion, keeping
-// all data in GPU memory.
-//
-// CPU Fallback:
-// =============
-// If rocDecode is unavailable or the video format is not supported by VCN
-// hardware, we automatically fall back to CPU decoding (similar to NVDEC
-// implementation).
-//
-/* clang-format on */

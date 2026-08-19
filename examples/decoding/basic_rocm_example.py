@@ -8,14 +8,14 @@ Accelerated video decoding on AMD GPUs with ROCm and rocDecode
 ================================================================
 
 TorchCodec can use supported AMD hardware (GPUs with VCN - Video Core Next) to speed-up
-video decoding. This is called "ROCm Decoding" and it uses AMD's
-`rocDecode hardware decoder <https://rocm.docs.amd.com/projects/rocDecode/en/latest>`_
-and HIP kernels to respectively decompress and convert to RGB.
-ROCm Decoding can be faster than CPU Decoding for the actual decoding step and also for
-subsequent transform steps like scaling, cropping or rotating. This is because the decode step leaves
+video decoding. ROCm software currently support hardware enabled decoding via 
+`rocDecode <https://rocm.docs.amd.com/projects/rocDecode/en/latest>`_.
+It can be combined with `RPP <https://rocm.docs.amd.com/projects/rpp/en/latest>`_ 
+to do post-processing after decode to convert decompressed YUV frames into RGB.
+rocDecode can be faster than CPU based decoding and also RPP for subsequent 
+transform steps like scaling, cropping or rotating. This is because the decode step leaves
 the decoded tensor in GPU memory so the GPU doesn't have to fetch from main memory before
-running the transform steps. Encoded packets are often much smaller than decoded frames so
-ROCm decoding also uses less PCI-e bandwidth.
+running the transform steps.
 
 Installing TorchCodec with ROCm Enabled
 ---------------------------------------
@@ -132,15 +132,15 @@ rocm_frames = rocm_decoder.get_frames_played_at(timestamps).data
 def plot_cpu_and_rocm_frames(cpu_frames: torch.Tensor, rocm_frames: torch.Tensor):
     try:
         import matplotlib.pyplot as plt
-        from torchvision.transforms.v2.functional import to_pil_image
     except ImportError:
-        print("Cannot plot, please run `pip install torchvision matplotlib`")
+        print("Cannot plot, please run `pip install matplotlib`")
         return
     n_rows = len(timestamps)
     fig, axes = plt.subplots(n_rows, 2, figsize=[12.8, 16.0])
     for i in range(n_rows):
-        axes[i][0].imshow(to_pil_image(cpu_frames[i].to("cpu")))
-        axes[i][1].imshow(to_pil_image(rocm_frames[i].to("cpu")))
+        # Convert NCHW to HWC format for matplotlib
+        axes[i][0].imshow(cpu_frames[i].permute(1, 2, 0).cpu().numpy())
+        axes[i][1].imshow(rocm_frames[i].permute(1, 2, 0).cpu().numpy())
 
     axes[0][0].set_title("CPU decoder", fontsize=24)
     axes[0][1].set_title("ROCm decoder", fontsize=24)
