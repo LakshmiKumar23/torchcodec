@@ -80,7 +80,7 @@ static UniqueRocDecDecoder createDecoder(RocdecVideoFormat* videoFormat) {
   decoderParams.display_rect.bottom = videoFormat->display_area.bottom;
 
   rocDecDecoderHandle* decoder = new rocDecDecoderHandle();
-  
+
   rocDecStatus result = rocDecCreateDecoder(decoder, &decoderParams);
   
   STD_TORCH_CHECK(
@@ -254,13 +254,22 @@ void RocmDeviceInterface::initialize(const SharedAVCodecContext& codec_context) 
   // Store codec context for fallback color range info
   codecContext_ = codec_context;
 
-  // Select chroma upsampling based on bit depth:
-  // - 10-bit: bilinear (best match for FFmpeg's scaled pipeline)
-  // - 8-bit: nearest-neighbor (matches FFmpeg's unscaled fast path)
+  // Select chroma upsampling for the RPP NV12->RGB kernel to match FFmpeg's swscale
+  // output. FFmpeg's vertical chroma handling for >8-bit (scaled) content differs by
+  // major version, so the >8-bit choice is version-gated:
+  //   - 8-bit:            nearest-neighbor (matches FFmpeg's unscaled fast path)
+  //   - 10-bit, FFmpeg 4: linear
+  //   - 10-bit, FFmpeg>4: bicubic (B=0, C=0.6); see FFmpeg9_YUV_to_RGB_spec.md
+  // The matching .so is loaded per FFmpeg major version, so a compile-time check is
+  // correct here. FFmpeg 4 == libavcodec 58.
   const AVPixFmtDescriptor* desc =
       av_pix_fmt_desc_get(codec_context->pix_fmt);
   if (desc && desc->comp[0].depth > 8) {
+#if LIBAVCODEC_VERSION_MAJOR <= 58
     chromaUpsampling_ = ChromaUpsampling::kLinear;
+#else
+    chromaUpsampling_ = ChromaUpsampling::kCubic;
+#endif
   } else {
     chromaUpsampling_ = ChromaUpsampling::kNearestNeighbor;
   }
