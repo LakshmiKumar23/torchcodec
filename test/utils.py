@@ -216,6 +216,11 @@ def psnr(a, b, max_val=255) -> float:
 # not guarantee bit-for-bit equality across systems and architectures, so we
 # also cannot. We currently use Linux on x86_64 as our reference system.
 def assert_frames_equal(*args, **kwargs):
+    # Optional per-call tolerance override. Used only by the ROCm 10-bit hardware-decode test:
+    # rocDecode's 8-bit NV12 downconvert quantizes differently than FFmpeg's full-precision
+    # 10-bit path, leaving ~0.1% of pixels at diff=4 (zero-mean, PSNR > 50 dB). All other tests
+    # keep their default (strict) tolerance.
+    atol_override = kwargs.pop("atol", None)
     if sys.platform == "linux" and "x86" in platform.machine().lower():
         if args[0].device.type == "cuda":
             # Determine tolerance based on CUDA/ROCm version
@@ -225,7 +230,9 @@ def assert_frames_equal(*args, **kwargs):
             else:
                 # ROCm case - use tolerance of 3 like CUDA 13+
                 atol = 3
-            
+            if atol_override is not None:
+                atol = atol_override
+
             if ffmpeg_major_version == 4:
                 assert_tensor_close_on_at_least(
                     args[0], args[1], percentage=95, atol=atol
