@@ -36,7 +36,8 @@ using UniqueRocDecDecoder =
     std::unique_ptr<rocDecDecoderHandle, RocDecDecoderDeleter>;
 
 // A per-device cache for rocDecode decoders. There is one instance of this
-// class per GPU device, and it is accessed through the static getCache() method.
+// class per GPU device, and it is accessed through the static getCache()
+// method.
 class RocDecCache {
  public:
   static RocDecCache& getCache(const StableDevice& device);

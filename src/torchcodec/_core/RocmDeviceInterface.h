@@ -8,8 +8,9 @@
 // hardware decoder via rocDecode while keeping FFmpeg for demuxing.
 // Implementation inspired by NVDEC integration and DALI's approach.
 //
-// rocDecode Library: https://github.com/ROCm/rocm-systems/tree/develop/projects/rocdecode
-// AMD VCN (Video Core Next) Architecture docs:
+// rocDecode Library:
+// https://github.com/ROCm/rocm-systems/tree/develop/projects/rocdecode AMD VCN
+// (Video Core Next) Architecture docs:
 // https://rocm.docs.amd.com/projects/rocDecode/en/latest
 
 /* clang-format off */
@@ -20,7 +21,7 @@
 // AMD's VCN (Video Core Next) hardware decoder.
 //
 // Architecture Design:
-// 
+//
 // At a high level, this decoding interface mimics the FFmpeg send/receive
 // architecture while using rocDecode for hardware acceleration:
 // - sendPacket(AVPacket) sends an AVPacket from the FFmpeg demuxer to the
@@ -89,14 +90,13 @@
 //
 /* clang-format on */
 
-
 #pragma once
 
-#include "RocmCommon.h"
 #include "Cache.h"
 #include "DeviceInterface.h"
 #include "FFMPEGCommon.h"
 #include "RocDecCache.h"
+#include "RocmCommon.h"
 
 #include <map>
 #include <memory>
@@ -148,7 +148,7 @@ class RocmDeviceInterface : public DeviceInterface {
   void initializeBSF(
       const AVCodecParameters* codecPar,
       const UniqueDecodingAVFormatContext& avFormatCtx);
-  
+
   // Apply bitstream filter, returns filtered packet or original if no filter
   // needed.
   ReferenceAVPacket& applyBSF(
@@ -190,7 +190,7 @@ class RocmDeviceInterface : public DeviceInterface {
 
   // Chroma upsampling mode: NN for 8-bit, bilinear for 10-bit
   ChromaUpsampling chromaUpsampling_ = ChromaUpsampling::kNearestNeighbor;
-  
+
   // Software scaling context for format conversion (fallback)
   UniqueSwsContext swsContext_;
 };

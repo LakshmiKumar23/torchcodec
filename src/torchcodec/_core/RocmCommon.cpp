@@ -17,7 +17,8 @@ namespace facebook::torchcodec {
 
 namespace {
 
-// Map FFmpeg metadata to rppt_yuv_to_rgb (RpptColorStandard / RpptColorRange in rppdefs.h).
+// Map FFmpeg metadata to rppt_yuv_to_rgb (RpptColorStandard / RpptColorRange in
+// rppdefs.h).
 RpptColorStandard avColorSpaceToRppColStandard(AVColorSpace space) {
   switch (space) {
     case AVCOL_SPC_FCC:
@@ -72,9 +73,8 @@ torch::stable::Tensor convertNV12FrameToRGB(
     hipStream_t rocdecStream,
     ChromaUpsampling chromaUpsampling,
     std::optional<torch::stable::Tensor> preAllocatedOutputTensor) {
-
   auto frameDims = FrameDims(avFrame.height, avFrame.width);
-  
+
   STD_TORCH_CHECK(
       avFrame.format == AV_PIX_FMT_NV12,
       "convertNV12FrameToRGB on ROCm expects NV12 (AV_PIX_FMT_NV12); "
@@ -100,43 +100,32 @@ torch::stable::Tensor convertNV12FrameToRGB(
   // color-converting it with HIP kernels.
   // So we make the RPP stream wait for rocDecode to finish.
   hipStream_t rppStream = rppCtx->stream;
-  
+
   hipEvent_t rocdecodeDoneEvent;
   hipError_t err = hipEventCreate(&rocdecodeDoneEvent);
   STD_TORCH_CHECK(
-      err == hipSuccess,
-      "hipEventCreate failed: ",
-      hipGetErrorString(err));
-  
+      err == hipSuccess, "hipEventCreate failed: ", hipGetErrorString(err));
+
   err = hipEventRecord(rocdecodeDoneEvent, rocdecStream);
   STD_TORCH_CHECK(
-      err == hipSuccess,
-      "hipEventRecord failed: ",
-      hipGetErrorString(err));
-  
+      err == hipSuccess, "hipEventRecord failed: ", hipGetErrorString(err));
+
   err = hipStreamWaitEvent(rppStream, rocdecodeDoneEvent, 0);
   STD_TORCH_CHECK(
-      err == hipSuccess,
-      "hipStreamWaitEvent failed: ",
-      hipGetErrorString(err));
-  
+      err == hipSuccess, "hipStreamWaitEvent failed: ", hipGetErrorString(err));
+
   err = hipEventDestroy(rocdecodeDoneEvent);
   STD_TORCH_CHECK(
-      err == hipSuccess,
-      "hipEventDestroy failed: ",
-      hipGetErrorString(err));
+      err == hipSuccess, "hipEventDestroy failed: ", hipGetErrorString(err));
 
   err = hipStreamGetFlags(rppCtx->stream, &rppCtx->streamFlags);
   STD_TORCH_CHECK(
-      err == hipSuccess,
-      "hipStreamGetFlags failed: ",
-      hipGetErrorString(err));
+      err == hipSuccess, "hipStreamGetFlags failed: ", hipGetErrorString(err));
 
   // NV12: Y plane then interleaved UV (device pointers from rocDecode).
   uint8_t* yuvData[2] = {avFrame.data[0], avFrame.data[1]};
 
-  rppStatus_t setStreamStatus =
-      rppSetStream(rppCtx->handle, rppCtx->stream);
+  rppStatus_t setStreamStatus = rppSetStream(rppCtx->handle, rppCtx->stream);
   STD_TORCH_CHECK(
       setStreamStatus == rppStatusSuccess,
       "rppSetStream failed. Status: ",
@@ -147,20 +136,32 @@ torch::stable::Tensor convertNV12FrameToRGB(
 
   RpptDesc srcDesc(1, 1, h, w, RpptDataType::U8, RpptLayout::NHWC);
 
-  const Rpp32u rgbRowBytes =
-      static_cast<Rpp32u>(dst.strides()[0]) * static_cast<Rpp32u>(dst.element_size());
+  const Rpp32u rgbRowBytes = static_cast<Rpp32u>(dst.strides()[0]) *
+      static_cast<Rpp32u>(dst.element_size());
   RpptStrides dstStrides{rgbRowBytes * h, rgbRowBytes, 3, 1};
-  RpptDesc dstDesc(1, 3, h, w, RpptDataType::U8, RpptLayout::NHWC, 0, dstStrides);
+  RpptDesc dstDesc(
+      1, 3, h, w, RpptDataType::U8, RpptLayout::NHWC, 0, dstStrides);
 
-  const RpptColorStandard colStandard =
-      avColorSpaceToRppColStandard(static_cast<AVColorSpace>(avFrame.colorspace));
-  const RpptColorRange colorRange =
-      avColorRangeToRppColorRange(static_cast<AVColorRange>(avFrame.color_range));
+  const RpptColorStandard colStandard = avColorSpaceToRppColStandard(
+      static_cast<AVColorSpace>(avFrame.colorspace));
+  const RpptColorRange colorRange = avColorRangeToRppColorRange(
+      static_cast<AVColorRange>(avFrame.color_range));
 
   using RppYuvToRgbFn = RppStatus (*)(
-      RppPtr_t, RppPtr_t, RpptDescPtr, RppPtr_t, RpptDescPtr,
-      Rpp32u, Rpp32u, Rpp32u, Rpp32u, Rpp32u,
-      RpptColorStandard, RpptColorRange, rppHandle_t, RppBackend);
+      RppPtr_t,
+      RppPtr_t,
+      RpptDescPtr,
+      RppPtr_t,
+      RpptDescPtr,
+      Rpp32u,
+      Rpp32u,
+      Rpp32u,
+      Rpp32u,
+      Rpp32u,
+      RpptColorStandard,
+      RpptColorRange,
+      rppHandle_t,
+      RppBackend);
 
   RppYuvToRgbFn yuvToRgbFn;
   const char* modeName;
@@ -230,7 +231,7 @@ UniqueRppContext getRppStreamContext(const StableDevice& device) {
   rppStatus_t status = rppCreate(
       &ctx->handle,
       batchSize,
-      0,  // numThreads = 0 for HIP backend
+      0, // numThreads = 0 for HIP backend
       ctx->stream,
       RPP_HIP_BACKEND);
   STD_TORCH_CHECK(

@@ -64,7 +64,6 @@ from .utils import (
     CMYK_JPEG,
     CORRUPT_JPEG,
     cuda_devices,
-    rocm_devices,
     DISCARD_FIRST_KEYFRAME_VIDEO,
     FRAME_EXCEEDS_SCREEN_GIF,
     get_ffmpeg_minor_version,
@@ -100,18 +99,19 @@ from .utils import (
     NASA_VIDEO_ROTATED,
     needs_avif,
     needs_cuda,
-    needs_rocm,
     needs_ffmpeg_cli,
     needs_heic,
     needs_jpeg,
     needs_png,
+    needs_rocm,
     needs_webp,
     psnr,
-    rocm_version_used_for_building_torch,
     RGBA_AVIF,
     RGBA_HEIC,
     RGBA_PNG,
     RGBA_WEBP,
+    rocm_devices,
+    rocm_version_used_for_building_torch,
     SIGSEGV_PNG,
     SINE_16_CHANNEL_S16,
     SINE_MONO_F32,
@@ -2421,7 +2421,6 @@ class TestVideoDecoder:
             create_decoder()
             assert _core._get_nvdec_cache_size(device_index=0) == 0
 
-
     # ===== ROCm rocDecode Interface Tests =====
 
     @needs_rocm
@@ -2440,9 +2439,7 @@ class TestVideoDecoder:
     )
     @pytest.mark.parametrize("contiguous_indices", (True, False))
     @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
-    def test_rocm_interface_get_frame_at(
-        self, asset, contiguous_indices, seek_mode
-    ):
+    def test_rocm_interface_get_frame_at(self, asset, contiguous_indices, seek_mode):
         """Test ROCm rocDecode interface for get_frame_at."""
         # Compare ROCm decoder against CPU decoder
         rocm_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
@@ -2458,7 +2455,7 @@ class TestVideoDecoder:
         for frame_index in indices:
             cpu_frame = cpu_decoder.get_frame_at(frame_index)
             rocm_frame = rocm_decoder.get_frame_at(frame_index)
-            
+
             # ROCm color conversion may have small differences from CPU
             if ffmpeg_major_version > 5 and asset is not TEST_SRC_2_720P_MPEG4:
                 # Allow small tolerance for GPU vs CPU color conversion differences
@@ -2485,9 +2482,7 @@ class TestVideoDecoder:
     )
     @pytest.mark.parametrize("contiguous_indices", (True, False))
     @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
-    def test_rocm_interface_get_frames_at(
-        self, asset, contiguous_indices, seek_mode
-    ):
+    def test_rocm_interface_get_frames_at(self, asset, contiguous_indices, seek_mode):
         """Test ROCm rocDecode interface for get_frames_at (batch)."""
         rocm_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
         cpu_decoder = VideoDecoder(asset.path, device="cpu", seek_mode=seek_mode)
@@ -2535,7 +2530,10 @@ class TestVideoDecoder:
         cpu_decoder = VideoDecoder(asset.path, device="cpu", seek_mode=seek_mode)
 
         for frame_index in range(0, len(rocm_decoder), 10):
-            pts_seconds = rocm_decoder.metadata.begin_stream_seconds + frame_index / rocm_decoder.metadata.average_fps
+            pts_seconds = (
+                rocm_decoder.metadata.begin_stream_seconds
+                + frame_index / rocm_decoder.metadata.average_fps
+            )
 
             cpu_frame = cpu_decoder.get_frame_played_at(pts_seconds)
             rocm_frame = rocm_decoder.get_frame_played_at(pts_seconds)
@@ -2569,7 +2567,8 @@ class TestVideoDecoder:
         cpu_decoder = VideoDecoder(asset.path, device="cpu", seek_mode=seek_mode)
 
         timestamps = [
-            rocm_decoder.metadata.begin_stream_seconds + i / rocm_decoder.metadata.average_fps
+            rocm_decoder.metadata.begin_stream_seconds
+            + i / rocm_decoder.metadata.average_fps
             for i in range(0, len(rocm_decoder), 10)
         ]
 
@@ -2634,7 +2633,7 @@ class TestVideoDecoder:
 
         # Fallback status should be known immediately for ROCm (like beta CUDA)
         assert rocm_dec.cpu_fallback.status_known
-        
+
         # rocDecode may or may not fall back for this video - both are valid
         # If it does fall back, verify the reason is reported
         if rocm_dec.cpu_fallback:
@@ -2643,7 +2642,7 @@ class TestVideoDecoder:
         # Verify frames decode correctly regardless of fallback
         frame = rocm_dec.get_frame_at(0)
         assert frame.data.device.type == "cuda"  # Still on GPU memory
-        
+
         # Compare with CPU decoder to ensure correctness
         cpu_dec = VideoDecoder(H265_VIDEO.path, device="cpu")
         cpu_frame = cpu_dec.get_frame_at(0)
@@ -2661,7 +2660,7 @@ class TestVideoDecoder:
 
         # For ROCm interface, status is known immediately (unlike FFmpeg CUDA)
         assert decoder.cpu_fallback.status_known
-        
+
         # rocDecode may or may not support this video - both outcomes are valid
         # If it does fall back, verify the reason is reported
         if decoder.cpu_fallback:
@@ -2722,18 +2721,18 @@ class TestVideoDecoder:
         decoder_rocm = VideoDecoder(asset.path, device="cuda")
 
         assert decoder_rocm.cpu_fallback.status_known
-        assert not decoder_rocm.cpu_fallback, (
-            "H.265 10-bit should be hardware-decoded by rocDecode"
-        )
+        assert (
+            not decoder_rocm.cpu_fallback
+        ), "H.265 10-bit should be hardware-decoded by rocDecode"
 
         decoder_cpu = VideoDecoder(asset.path)
 
         for frame_index in (0, 10, 20, 5):
             frame_rocm = decoder_rocm.get_frame_at(frame_index).data
             assert frame_rocm.device.type == "cuda"
-            assert frame_rocm.dtype == torch.uint8, (
-                f"Expected uint8 output, got {frame_rocm.dtype}"
-            )
+            assert (
+                frame_rocm.dtype == torch.uint8
+            ), f"Expected uint8 output, got {frame_rocm.dtype}"
 
             frame_cpu = decoder_cpu.get_frame_at(frame_index).data
             assert frame_cpu.dtype == torch.uint8
@@ -2747,30 +2746,38 @@ class TestVideoDecoder:
         asset = H264_10BITS
 
         decoder_rocm = VideoDecoder(asset.path, device="cuda")
-        
+
         # H.264 10-bit should trigger CPU fallback
         assert decoder_rocm.cpu_fallback.status_known
-        assert decoder_rocm.cpu_fallback, "H.264 10-bit should fall back to CPU on rocDecode"
+        assert (
+            decoder_rocm.cpu_fallback
+        ), "H.264 10-bit should fall back to CPU on rocDecode"
         # Fallback reason may vary, just verify fallback is happening
         assert "Falling back" in str(decoder_rocm.cpu_fallback)
-        
+
         decoder_cpu = VideoDecoder(asset.path)
 
         frame_indices = [0, 10, 20, 5]
         for frame_index in frame_indices:
             frame_rocm = decoder_rocm.get_frame_at(frame_index).data
             assert frame_rocm.device.type == "cuda"  # Still on GPU memory
-            assert frame_rocm.dtype == torch.uint8, f"Expected uint8 from CPU fallback, got {frame_rocm.dtype}"
-            
+            assert (
+                frame_rocm.dtype == torch.uint8
+            ), f"Expected uint8 from CPU fallback, got {frame_rocm.dtype}"
+
             frame_cpu = decoder_cpu.get_frame_at(frame_index).data
-            assert frame_cpu.dtype == torch.uint8, f"Expected uint8 from CPU decoder, got {frame_cpu.dtype}"
-            
+            assert (
+                frame_cpu.dtype == torch.uint8
+            ), f"Expected uint8 from CPU decoder, got {frame_cpu.dtype}"
+
             # CPU fallback goes through: CPU decode → NV12 conversion → GPU transfer → RGB conversion
             # Direct CPU goes through: CPU decode → RGB24 conversion
             # Double color conversion introduces differences, so use PSNR threshold
             # For 10-bit videos decoded as 8-bit, PSNR > 23 dB indicates good quality match
             frame_psnr = psnr(frame_rocm.cpu(), frame_cpu)
-            assert frame_psnr > 23, f"PSNR {frame_psnr:.2f} dB is too low for frame {frame_index}"
+            assert (
+                frame_psnr > 23
+            ), f"PSNR {frame_psnr:.2f} dB is too low for frame {frame_index}"
 
         # Check batch API also uses PSNR threshold
         frames_rocm = decoder_rocm.get_frames_at(frame_indices).data
@@ -2782,59 +2789,65 @@ class TestVideoDecoder:
     @needs_rocm
     def test_rocm_av1_video_support(self):
         """Test that AV1 videos are decoded by rocDecode hardware.
-        
+
         Note: AV1 hardware vs software decoding has larger differences than other codecs,
         so we use PSNR validation instead of pixel-wise comparison.
         """
         # rocDecode supports AV1 codec
         asset = AV1_VIDEO
-        
+
         decoder_rocm = VideoDecoder(asset.path, device="cuda")
-        
+
         # AV1 should NOT trigger CPU fallback
         assert decoder_rocm.cpu_fallback.status_known
-        assert not decoder_rocm.cpu_fallback, "AV1 should be hardware-decoded by rocDecode"
-        
+        assert (
+            not decoder_rocm.cpu_fallback
+        ), "AV1 should be hardware-decoded by rocDecode"
+
         decoder_cpu = VideoDecoder(asset.path)
-        
+
         # Test a few frames
         frame_indices = [0, 5, 10]
         for frame_index in frame_indices:
             frame_rocm = decoder_rocm.get_frame_at(frame_index).data
             assert frame_rocm.device.type == "cuda"
             assert frame_rocm.dtype == torch.uint8
-            
+
             frame_cpu = decoder_cpu.get_frame_at(frame_index).data
             assert frame_cpu.dtype == torch.uint8
 
             # AV1 codec has significant hardware vs software implementation differences
             # Use PSNR validation to measure perceptual quality rather than exact pixel matching
             frame_psnr = psnr(frame_rocm.cpu(), frame_cpu)
-            assert frame_psnr > 25, f"PSNR {frame_psnr:.2f} dB is too low for AV1 frame {frame_index}"
+            assert (
+                frame_psnr > 25
+            ), f"PSNR {frame_psnr:.2f} dB is too low for AV1 frame {frame_index}"
 
     @needs_rocm
     def test_rocm_vp9_video_support(self):
         """Test that VP9 videos are decoded by rocDecode hardware."""
         # rocDecode supports VP9 codec
         asset = TEST_SRC_2_720P_VP9
-        
+
         decoder_rocm = VideoDecoder(asset.path, device="cuda")
 
         # VP9 should NOT trigger CPU fallback
         assert decoder_rocm.cpu_fallback.status_known
-        assert not decoder_rocm.cpu_fallback, "VP9 should be hardware-decoded by rocDecode"
-        
+        assert (
+            not decoder_rocm.cpu_fallback
+        ), "VP9 should be hardware-decoded by rocDecode"
+
         decoder_cpu = VideoDecoder(asset.path)
-        
+
         # Test a few frames
         frame_indices = [0, 5, 10]
         for frame_index in frame_indices:
             frame_rocm = decoder_rocm.get_frame_at(frame_index).data
             assert frame_rocm.device.type == "cuda"
             assert frame_rocm.dtype == torch.uint8
-            
+
             frame_cpu = decoder_cpu.get_frame_at(frame_index).data
-            
+
             # Hardware vs software decoding differences, use tolerance
             # Move CPU frame to GPU to use CUDA/ROCm tolerance path
             frame_cpu_gpu = frame_cpu.to("cuda")
@@ -2843,7 +2856,9 @@ class TestVideoDecoder:
     @needs_rocm
     def test_rocm_interface_error(self):
         """Test ROCm interface error handling for invalid device strings."""
-        with pytest.raises(RuntimeError, match="torch_parse_device_string.*API call failed"):
+        with pytest.raises(
+            RuntimeError, match="torch_parse_device_string.*API call failed"
+        ):
             VideoDecoder(NASA_VIDEO.path, device="cuda:0:bad_variant")
 
     @needs_rocm
@@ -3008,7 +3023,12 @@ class TestVideoDecoder:
         ref_frame_last = NASA_VIDEO.get_frame_data_by_index(389).to("cuda")
 
         # Access a frame first to ensure iteration still works
-        torch.testing.assert_close(decoder[35], NASA_VIDEO.get_frame_data_by_index(35).to("cuda"), rtol=0, atol=3)
+        torch.testing.assert_close(
+            decoder[35],
+            NASA_VIDEO.get_frame_data_by_index(35).to("cuda"),
+            rtol=0,
+            atol=3,
+        )
 
         for i, frame in enumerate(decoder):
             if i == 0:
@@ -3030,7 +3050,9 @@ class TestVideoDecoder:
         decoded_frame9 = decoder.get_frame_at(9)
 
         assert decoded_frame9.pts_seconds == pytest.approx(ref_frame_info9.pts_seconds)
-        assert decoded_frame9.duration_seconds == pytest.approx(ref_frame_info9.duration_seconds, rel=1e-3)
+        assert decoded_frame9.duration_seconds == pytest.approx(
+            ref_frame_info9.duration_seconds, rel=1e-3
+        )
         torch.testing.assert_close(decoded_frame9.data, ref_frame9, rtol=0, atol=3)
 
     @needs_rocm
@@ -3053,16 +3075,28 @@ class TestVideoDecoder:
         assert isinstance(frames, FrameBatch)
 
         torch.testing.assert_close(
-            frames[0].data, NASA_VIDEO.get_frame_data_by_index(35).to("cuda"), rtol=0, atol=3
+            frames[0].data,
+            NASA_VIDEO.get_frame_data_by_index(35).to("cuda"),
+            rtol=0,
+            atol=3,
         )
         torch.testing.assert_close(
-            frames[1].data, NASA_VIDEO.get_frame_data_by_index(25).to("cuda"), rtol=0, atol=3
+            frames[1].data,
+            NASA_VIDEO.get_frame_data_by_index(25).to("cuda"),
+            rtol=0,
+            atol=3,
         )
         torch.testing.assert_close(
-            frames[2].data, NASA_VIDEO.get_frame_data_by_index(389).to("cuda"), rtol=0, atol=3
+            frames[2].data,
+            NASA_VIDEO.get_frame_data_by_index(389).to("cuda"),
+            rtol=0,
+            atol=3,
         )
         torch.testing.assert_close(
-            frames[3].data, NASA_VIDEO.get_frame_data_by_index(388).to("cuda"), rtol=0, atol=3
+            frames[3].data,
+            NASA_VIDEO.get_frame_data_by_index(388).to("cuda"),
+            rtol=0,
+            atol=3,
         )
 
     @needs_rocm
@@ -3073,10 +3107,16 @@ class TestVideoDecoder:
 
         ref_frame_played_at_6 = NASA_VIDEO.get_frame_data_by_index(180).to("cuda")
         torch.testing.assert_close(
-            decoder.get_frame_played_at(6.006).data, ref_frame_played_at_6, rtol=0, atol=3
+            decoder.get_frame_played_at(6.006).data,
+            ref_frame_played_at_6,
+            rtol=0,
+            atol=3,
         )
         torch.testing.assert_close(
-            decoder.get_frame_played_at(6.02).data, ref_frame_played_at_6, rtol=0, atol=3
+            decoder.get_frame_played_at(6.02).data,
+            ref_frame_played_at_6,
+            rtol=0,
+            atol=3,
         )
 
         assert isinstance(decoder.get_frame_played_at(6.02).pts_seconds, float)
@@ -3131,7 +3171,7 @@ class TestVideoDecoder:
             start=0, stop=10, stream_index=stream_index
         ).to("cuda")
         frames0_10 = decoder.get_frames_in_range(start=0, stop=10)
-
+        torch.testing.assert_close(frames0_10.data, ref_frames0_10, rtol=0, atol=3)
 
     @needs_rocm
     @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
@@ -3150,11 +3190,15 @@ class TestVideoDecoder:
 
         # Negative indices
         frames387_389_neg = decoder.get_frames_in_range(start=-3, stop=1000)
-        torch.testing.assert_close(frames387_389_neg.data, ref_frame387_389, rtol=0, atol=3)
+        torch.testing.assert_close(
+            frames387_389_neg.data, ref_frame387_389, rtol=0, atol=3
+        )
 
         # None as stop
         frames387_None = decoder.get_frames_in_range(start=-3, stop=None)
-        torch.testing.assert_close(frames387_None.data, ref_frame387_389, rtol=0, atol=3)
+        torch.testing.assert_close(
+            frames387_None.data, ref_frame387_389, rtol=0, atol=3
+        )
 
     @needs_rocm
     @pytest.mark.parametrize("dimension_order", ["NCHW", "NHWC"])
@@ -3258,7 +3302,9 @@ class TestVideoDecoder:
     @needs_rocm
     @pytest.mark.parametrize("method", ("from_file", "from_string"))
     @pytest.mark.parametrize("stream_index", [0, 3])
-    def test_rocm_custom_frame_mappings_json_and_bytes(self, tmp_path, method, stream_index):
+    def test_rocm_custom_frame_mappings_json_and_bytes(
+        self, tmp_path, method, stream_index
+    ):
         """Test ROCm decoder with custom frame mappings."""
         # Use the same approach as CUDA test - generate real frame mappings from ffprobe
         custom_frame_mappings = NASA_VIDEO.generate_custom_frame_mappings(stream_index)
@@ -3441,7 +3487,9 @@ class TestVideoDecoder:
 
         assert decoded_frame10.duration_seconds == ref_frame_info10.duration_seconds
         assert decoded_frame10.pts_seconds == ref_frame_info10.pts_seconds
-        torch.testing.assert_close(decoded_frame10.data, ref_frame10.to("cuda"), rtol=0, atol=3)
+        torch.testing.assert_close(
+            decoded_frame10.data, ref_frame10.to("cuda"), rtol=0, atol=3
+        )
 
     # 10-bit video test
     @needs_rocm
@@ -3462,7 +3510,6 @@ class TestVideoDecoder:
             assert decoder.cpu_fallback.status_known
             assert not decoder.cpu_fallback
         # H.264 10-bit fallback status is checked in test_rocm_h264_10bit_cpu_fallback
-
 
     def test_cpu_fallback_no_fallback_on_cpu_device(self):
         """Test that CPU device doesn't trigger fallback (it's not a fallback scenario)."""

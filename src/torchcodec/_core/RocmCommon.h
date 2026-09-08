@@ -70,8 +70,8 @@ using UniqueRppContext = std::unique_ptr<RppContext, RppContextDeleter>;
 // Chroma upsampling mode for NV12→RGB conversion.
 enum class ChromaUpsampling {
   kNearestNeighbor, // rppt_yuv_to_rgb: matches FFmpeg 8-bit unscaled fast path
-  kLinear,          // rppt_yuv_to_rgb_linear_v: best match for FFmpeg 10-bit
-  kCubic,           // rppt_yuv_to_rgb_cubic_v: FFmpeg-compatible cubic
+  kLinear, // rppt_yuv_to_rgb_linear_v: best match for FFmpeg 10-bit
+  kCubic, // rppt_yuv_to_rgb_cubic_v: FFmpeg-compatible cubic
 };
 
 torch::stable::Tensor convertNV12FrameToRGB(
@@ -80,7 +80,8 @@ torch::stable::Tensor convertNV12FrameToRGB(
     const UniqueRppContext& rppCtx,
     hipStream_t rodecStream,
     ChromaUpsampling chromaUpsampling,
-    std::optional<torch::stable::Tensor> preAllocatedOutputTensor = std::nullopt);
+    std::optional<torch::stable::Tensor> preAllocatedOutputTensor =
+        std::nullopt);
 
 UniqueRppContext getRppStreamContext(const StableDevice& device);
 void returnRppStreamContextToCache(

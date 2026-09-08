@@ -8,11 +8,11 @@ Accelerated video decoding on AMD GPUs with ROCm and rocDecode
 ================================================================
 
 TorchCodec can use supported AMD hardware (GPUs with VCN - Video Core Next) to speed-up
-video decoding. ROCm software currently support hardware enabled decoding via 
+video decoding. ROCm software currently support hardware enabled decoding via
 `rocDecode <https://rocm.docs.amd.com/projects/rocDecode/en/latest>`_.
-It can be combined with `RPP <https://rocm.docs.amd.com/projects/rpp/en/latest>`_ 
+It can be combined with `RPP <https://rocm.docs.amd.com/projects/rpp/en/latest>`_
 to do post-processing after decode to convert decompressed YUV frames into RGB.
-rocDecode can be faster than CPU based decoding and also RPP for subsequent 
+rocDecode can be faster than CPU based decoding and also RPP for subsequent
 transform steps like scaling, cropping or rotating. This is because the decode step leaves
 the decoded tensor in GPU memory so the GPU doesn't have to fetch from main memory before
 running the transform steps.

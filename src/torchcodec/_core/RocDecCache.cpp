@@ -6,9 +6,9 @@
 
 #include <mutex>
 
-#include "RocmCommon.h"
 #include "FFMPEGCommon.h"
 #include "RocDecCache.h"
+#include "RocmCommon.h"
 
 #include <hip/hip_runtime.h>
 
