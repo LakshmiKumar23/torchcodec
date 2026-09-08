@@ -142,35 +142,15 @@ torch::stable::Tensor convertNV12FrameToRGB(
       "rppSetStream failed. Status: ",
       setStreamStatus);
 
-  RpptDesc srcDesc{};
-  srcDesc.numDims = 4;
-  srcDesc.offsetInBytes = 0;
-  srcDesc.dataType = RpptDataType::U8;
-  srcDesc.n = 1;
-  srcDesc.c = 1;
-  srcDesc.h = static_cast<Rpp32u>(frameDims.height);
-  srcDesc.w = static_cast<Rpp32u>(frameDims.width);
-  srcDesc.layout = RpptLayout::NHWC;
-  srcDesc.strides.nStride = srcDesc.c * srcDesc.w * srcDesc.h;
-  srcDesc.strides.hStride = srcDesc.c * srcDesc.w;
-  srcDesc.strides.wStride = srcDesc.c;
-  srcDesc.strides.cStride = 1;
+  const Rpp32u h = static_cast<Rpp32u>(frameDims.height);
+  const Rpp32u w = static_cast<Rpp32u>(frameDims.width);
+
+  RpptDesc srcDesc(1, 1, h, w, RpptDataType::U8, RpptLayout::NHWC);
 
   const Rpp32u rgbRowBytes =
       static_cast<Rpp32u>(dst.strides()[0]) * static_cast<Rpp32u>(dst.element_size());
-  RpptDesc dstDesc{};
-  dstDesc.numDims = 4;
-  dstDesc.offsetInBytes = 0;
-  dstDesc.dataType = RpptDataType::U8;
-  dstDesc.n = 1;
-  dstDesc.c = 3;
-  dstDesc.h = static_cast<Rpp32u>(frameDims.height);
-  dstDesc.w = static_cast<Rpp32u>(frameDims.width);
-  dstDesc.layout = RpptLayout::NHWC;
-  dstDesc.strides.nStride = rgbRowBytes * dstDesc.h;
-  dstDesc.strides.hStride = rgbRowBytes;
-  dstDesc.strides.wStride = 3;
-  dstDesc.strides.cStride = 1;
+  RpptStrides dstStrides{rgbRowBytes * h, rgbRowBytes, 3, 1};
+  RpptDesc dstDesc(1, 3, h, w, RpptDataType::U8, RpptLayout::NHWC, 0, dstStrides);
 
   const RpptColorStandard colStandard =
       avColorSpaceToRppColStandard(static_cast<AVColorSpace>(avFrame.colorspace));
