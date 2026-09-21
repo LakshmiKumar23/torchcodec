@@ -125,7 +125,9 @@ std::optional<rocDecVideoChromaFormat> validateChromaSupport(
   return std::nullopt;
 }
 
-bool nativeRocDecodeSupport(const SharedAVCodecContext& codecContext) {
+bool nativeRocDecodeSupport(
+    const SharedAVCodecContext& codecContext,
+    int deviceIndex) {
   auto codecType = validateCodecSupport(codecContext->codec_id);
   if (!codecType.has_value()) {
     return false;
@@ -142,6 +144,10 @@ bool nativeRocDecodeSupport(const SharedAVCodecContext& codecContext) {
   }
 
   RocdecDecodeCaps caps = {};
+  // Query the capabilities of the GPU we'll actually decode on. Leaving this at
+  // 0 would always query the first device, giving wrong answers on multi-GPU
+  // systems decoding on a non-zero device.
+  caps.device_id = static_cast<uint8_t>(deviceIndex);
   caps.codec_type = codecType.value();
   caps.chroma_format = chromaFormat.value();
   caps.bit_depth_minus_8 = desc->comp[0].depth - 8;
@@ -283,7 +289,7 @@ void RocmDeviceInterface::initialize_video_decoding(
     [[maybe_unused]] const VideoStreamOptions& video_stream_options) {
   STD_TORCH_CHECK(codecContext_ != nullptr, "Must call initialize() first");
 
-  if (!nativeRocDecodeSupport(codecContext_)) {
+  if (!nativeRocDecodeSupport(codecContext_, get_device_index(device_))) {
     cpuFallback_ = create_device_interface(c10::kCPU);
     STD_TORCH_CHECK(
         cpuFallback_ != nullptr, "Failed to create CPU device interface");
@@ -400,6 +406,28 @@ void RocmDeviceInterface::initializeBSF(
 int RocmDeviceInterface::handleVideoSequence(RocdecVideoFormat* videoFormat) {
   STD_TORCH_CHECK(videoFormat != nullptr, "Invalid video format");
 
+  // The parser calls this once at the start of the stream, and again whenever
+  // the stream properties change mid-stream (e.g. resolution). We don't yet
+  // support in-place reconfiguration via rocDecReconfigureDecoder, so if a
+  // decoder already exists and the format has changed in a way that would
+  // require a differently-configured decoder, fail loudly rather than decode
+  // against stale parameters and emit corrupt frames.
+  // TODO: support mid-stream reconfiguration via rocDecReconfigureDecoder.
+  if (decoder_) {
+    bool formatChanged = videoFormat->codec != videoFormat_.codec ||
+        videoFormat->coded_width != videoFormat_.coded_width ||
+        videoFormat->coded_height != videoFormat_.coded_height ||
+        videoFormat->chroma_format != videoFormat_.chroma_format ||
+        videoFormat->bit_depth_luma_minus8 !=
+            videoFormat_.bit_depth_luma_minus8;
+    STD_TORCH_CHECK(
+        !formatChanged,
+        "Mid-stream video format change is not supported by the ROCm decoder. "
+        "The stream changed resolution, codec, chroma format, or bit depth "
+        "after decoding began, which would require reconfiguring the hardware "
+        "decoder. This is not yet implemented.");
+  }
+
   videoFormat_ = *videoFormat;
 
   if (videoFormat_.min_num_decode_surfaces == 0) {
@@ -411,7 +439,6 @@ int RocmDeviceInterface::handleVideoSequence(RocdecVideoFormat* videoFormat) {
 
     if (!decoder_) {
       decoder_ = createDecoder(videoFormat);
-    } else {
     }
 
     STD_TORCH_CHECK(decoder_, "Failed to get or create decoder");

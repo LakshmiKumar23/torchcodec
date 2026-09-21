@@ -59,8 +59,14 @@
 //
 // Note on Frame Lifetime:
 // =======================
-// We release the previous frame
-// before getting a new one to avoid holding too many frames in decoder memory.
+// rocDecGetVideoFrame() maps a decoded picture from the decoder's internal
+// picture buffer (DPB) and returns HIP device pointers into that internally
+// managed memory; there is no explicit unmap/release call to pair with it.
+// Because the pointers alias DPB memory that the decoder may reuse for later
+// pictures, we must finish consuming a frame before the surface is recycled.
+// We do this in convert_av_frame_to_frame_output() by synchronizing the RPP
+// stream (hipStreamSynchronize) so the NV12->RGB conversion completes before
+// control returns and the surface can be handed out again.
 //
 // Supported Codecs (via AMD VCN hardware):
 // =========================================

@@ -180,9 +180,6 @@ torch::stable::Tensor convertNV12FrameToRGB(
       modeName = "nearest-neighbor";
       break;
   }
-  std::cout << "Using " << modeName
-            << " chroma upsampling for NV12 to RGB conversion on ROCm."
-            << std::endl;
 
   RppStatus status = yuvToRgbFn(
       yuvData[0],
