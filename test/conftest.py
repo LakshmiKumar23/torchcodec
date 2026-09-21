@@ -20,6 +20,9 @@ def pytest_configure(config):
         "markers", "needs_cuda: mark for tests that rely on a CUDA device"
     )
     config.addinivalue_line(
+        "markers", "needs_rocm: mark for tests that rely on a ROCm device"
+    )
+    config.addinivalue_line(
         "markers", "needs_ffmpeg_cli: mark for tests that rely on ffmpeg"
     )
     config.addinivalue_line(
@@ -82,6 +85,7 @@ def pytest_collection_modifyitems(items):
         # 'needs_cuda' mark, and the ones with device == 'cpu' won't have the
         # mark.
         needs_cuda = item.get_closest_marker("needs_cuda") is not None
+        needs_rocm = item.get_closest_marker("needs_rocm") is not None
         needs_ffmpeg_cli = item.get_closest_marker("needs_ffmpeg_cli") is not None
         needs_jpeg = item.get_closest_marker("needs_jpeg") is not None
         needs_png = item.get_closest_marker("needs_png") is not None
@@ -121,6 +125,20 @@ def pytest_collection_modifyitems(items):
             # supposed to run the CUDA tests, so if CUDA isn't available on
             # those for whatever reason, we need to know.
             item.add_marker(pytest.mark.skip(reason="CUDA not available."))
+
+        # Check if ROCm is available by checking torch.version.hip
+        is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
+        if (
+            needs_rocm
+            and not (torch.cuda.is_available() and is_rocm)
+            and os.environ.get("FAIL_WITHOUT_ROCM") is None
+        ):
+            # We skip ROCm tests on non-ROCm machines, but only if the
+            # FAIL_WITHOUT_ROCM env var wasn't set. If it's set, the test will
+            # typically fail. This env var is set on CI jobs that are supposed
+            # to run the ROCm tests, so if ROCm isn't available on those for
+            # whatever reason, we need to know.
+            item.add_marker(pytest.mark.skip(reason="ROCm not available."))
 
         # Same rationale as needs_cuda; see skip_image_decoder_test().
         if needs_jpeg and skip_image_decoder_test("jpeg"):

@@ -51,6 +51,7 @@ location = "source"
 
 [tool.scikit-build.cmake.define]
 ENABLE_CUDA = {env = "ENABLE_CUDA", default = ""}
+ENABLE_ROCM = {env = "ENABLE_ROCM", default = ""}
 TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR = {env = "TORCHCODEC_DISABLE_COMPILE_WARNING_AS_ERROR", default = "OFF"}
 TORCHCODEC_DISABLE_HOMEBREW_RPATH = {env = "TORCHCODEC_DISABLE_HOMEBREW_RPATH", default = "OFF"}
 

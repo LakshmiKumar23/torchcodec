@@ -8,3 +8,8 @@
 set -ex
 
 bash packaging/install_build_dependencies.sh
+
+if [[ "${CU_VERSION:-}" == rocm* ]]; then
+    bash packaging/install_rocdecode.sh
+    bash packaging/install_rpp.sh
+fi
