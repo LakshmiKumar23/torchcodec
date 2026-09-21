@@ -72,7 +72,7 @@
 // Hardware Requirements:
 // ======================
 // - AMD GPU with gfx908 or higher (RDNA 2+, CDNA 2+)
-// - ROCm 7.13.0 or later
+// - ROCm 10.1 or later
 // - libva-amdgpu-dev (VA-API AMD implementation)
 // - mesa-amdgpu-va-drivers
 //
