@@ -130,7 +130,7 @@ class RocmDeviceInterface : public DeviceInterface {
       std::optional<torch::stable::Tensor> pre_allocated_output_tensor =
           std::nullopt) override;
 
-  int send_packet(ReferenceAVPacket& av_packet) override;
+  int send_packet(const AVPacket& av_packet) override;
   int send_eof_packet() override;
   int receive_frame(UniqueAVFrame& av_frame) override;
   void flush() override;
@@ -149,11 +149,9 @@ class RocmDeviceInterface : public DeviceInterface {
       const AVCodecParameters* codecPar,
       const UniqueDecodingAVFormatContext& avFormatCtx);
 
-  // Apply bitstream filter, returns filtered packet or original if no filter
-  // needed.
-  ReferenceAVPacket& applyBSF(
-      ReferenceAVPacket& packet,
-      ReferenceAVPacket& filteredPacket);
+  // Apply bitstream filter, returns the filtered packet, or nullptr if no
+  // filter is needed (caller should then use the original packet).
+  UniqueAVPacket applyBSF(const AVPacket& packet);
 
   UniqueAVFrame convertRocmFrameToAVFrame(
       void* framePtr[3],

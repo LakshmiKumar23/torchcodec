@@ -420,24 +420,25 @@ int RocmDeviceInterface::handleVideoSequence(RocdecVideoFormat* videoFormat) {
   return static_cast<int>(videoFormat_.min_num_decode_surfaces);
 }
 
-int RocmDeviceInterface::send_packet(ReferenceAVPacket& av_packet) {
+int RocmDeviceInterface::send_packet(const AVPacket& av_packet) {
   if (cpuFallback_) {
     return cpuFallback_->send_packet(av_packet);
   }
 
   STD_TORCH_CHECK(
-      av_packet.get() && av_packet->data && av_packet->size > 0,
+      av_packet.data && av_packet.size > 0,
       "sendPacket received an empty av_packet");
 
-  AutoAVPacket filteredAutoPacket;
-  ReferenceAVPacket filteredPacket(filteredAutoPacket);
-  ReferenceAVPacket& packetToSend = applyBSF(av_packet, filteredPacket);
+  // `filteredPacket` owns the filtered samples for as long as it's in scope,
+  // which covers the parser call below.
+  UniqueAVPacket filteredPacket = applyBSF(av_packet);
+  const AVPacket& packetToSend = filteredPacket ? *filteredPacket : av_packet;
 
   RocdecSourceDataPacket rocDecPacket = {};
-  rocDecPacket.payload = packetToSend->data;
-  rocDecPacket.payload_size = packetToSend->size;
+  rocDecPacket.payload = packetToSend.data;
+  rocDecPacket.payload_size = packetToSend.size;
   rocDecPacket.flags = ROCDEC_PKT_TIMESTAMP;
-  rocDecPacket.pts = packetToSend->pts;
+  rocDecPacket.pts = packetToSend.pts;
 
   int result = sendRocDecPacket(rocDecPacket);
   return result;
@@ -461,18 +462,30 @@ int RocmDeviceInterface::sendRocDecPacket(
   return result == ROCDEC_SUCCESS ? AVSUCCESS : AVERROR_EXTERNAL;
 }
 
-ReferenceAVPacket& RocmDeviceInterface::applyBSF(
-    ReferenceAVPacket& packet,
-    ReferenceAVPacket& filteredPacket) {
+UniqueAVPacket RocmDeviceInterface::applyBSF(const AVPacket& packet) {
   if (!bitstreamFilter_) {
-    return packet;
+    return nullptr;
   }
 
-  int retVal = av_bsf_send_packet(bitstreamFilter_.get(), packet.get());
+  // av_bsf_send_packet() takes ownership of what it is given: it moves the
+  // reference out of the packet, leaving it empty. Our caller only lends us
+  // theirs, so send a reference of our own instead.
+  UniqueAVPacket inputPacket(av_packet_alloc());
+  STD_TORCH_CHECK(inputPacket != nullptr, "Failed to allocate AVPacket");
+  int retVal = av_packet_ref(inputPacket.get(), &packet);
+  STD_TORCH_CHECK(
+      retVal >= AVSUCCESS,
+      "Failed to reference packet for the bitstream filter: ",
+      get_ffmpeg_error_string_from_error_code(retVal));
+
+  retVal = av_bsf_send_packet(bitstreamFilter_.get(), inputPacket.get());
   STD_TORCH_CHECK(
       retVal >= AVSUCCESS,
       "Failed to send packet to bitstream filter: ",
       get_ffmpeg_error_string_from_error_code(retVal));
+
+  UniqueAVPacket filteredPacket(av_packet_alloc());
+  STD_TORCH_CHECK(filteredPacket != nullptr, "Failed to allocate AVPacket");
 
   retVal = av_bsf_receive_packet(bitstreamFilter_.get(), filteredPacket.get());
   STD_TORCH_CHECK(
