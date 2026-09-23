@@ -6,12 +6,12 @@
 
 #pragma once
 
-#include <cuda_runtime.h>
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <torch/headeronly/util/Exception.h>
 
 #include <optional>
 
+#include "GpuCompat.h"
 #include "StableABICompat.h"
 
 namespace facebook::torchcodec {

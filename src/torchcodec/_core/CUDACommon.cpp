@@ -33,14 +33,14 @@ void sync_streams(cudaStream_t running_stream, cudaStream_t waiting_stream) {
       "cudaStreamWaitEvent failed: ",
       cudaGetErrorString(err));
 
-  cudaEventDestroy(event);
+  (void)cudaEventDestroy(event);
 }
 
 CudaEvent::~CudaEvent() {
   if (event_ != nullptr) {
     // Destroying an event that hasn't completed yet is fine: CUDA frees it once
     // it does.
-    cudaEventDestroy(event_);
+    (void)cudaEventDestroy(event_);
   }
 }
 
@@ -53,7 +53,7 @@ CudaEvent::CudaEvent(CudaEvent&& other) noexcept
 CudaEvent& CudaEvent::operator=(CudaEvent&& other) noexcept {
   if (this != &other) {
     if (event_ != nullptr) {
-      cudaEventDestroy(event_);
+      (void)cudaEventDestroy(event_);
     }
     event_ = other.event_;
     recorded_on_ = other.recorded_on_;
