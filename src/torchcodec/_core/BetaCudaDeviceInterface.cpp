@@ -697,10 +697,10 @@ int BetaCudaDeviceInterface::send_packet(const AVPacket& packet) {
   cuvid_packet.payload = packet_to_send.data;
   cuvid_packet.payload_size = packet_to_send.size;
   cuvid_packet.flags = CUVID_PKT_TIMESTAMP;
-  cuvid_packet.timestamp = packet_to_send.pts;
+  set_timestamp(cuvid_packet, packet_to_send.pts);
 
   if (packet_to_send.flags & AV_PKT_FLAG_DISCARD) {
-    discarded_timestamps_.insert(cuvid_packet.timestamp);
+    discarded_timestamps_.insert(get_timestamp(cuvid_packet));
   }
 
   return send_cuvid_packet(cuvid_packet);
@@ -803,7 +803,8 @@ int BetaCudaDeviceInterface::receive_frame(UniqueAVFrame& av_frame) {
   // Drop those packets that were marked as discard. We only wanted to decode
   // those, not to return them.
   while (!ready_frames_.empty() &&
-         discarded_timestamps_.erase(ready_frames_.front().timestamp) > 0) {
+         discarded_timestamps_.erase(get_timestamp(ready_frames_.front())) >
+             0) {
     ready_frames_.pop();
   }
 
@@ -816,18 +817,11 @@ int BetaCudaDeviceInterface::receive_frame(UniqueAVFrame& av_frame) {
   CUVIDPARSERDISPINFO disp_info = ready_frames_.front();
   ready_frames_.pop();
 
-  CUVIDPROCPARAMS proc_params = {};
-  proc_params.progressive_frame = disp_info.progressive_frame;
-  proc_params.top_field_first = disp_info.top_field_first;
-  proc_params.unpaired_field = disp_info.repeat_first_field < 0;
   // We set the NVDEC stream to the current stream, and remember it: consumers
   // of the mapped surface run later and possibly on a different stream, so they
   // need to know which stream produces the surface's content in order to wait
   // on it.
-  // Re types: we get a cudaStream_t from PyTorch but it's interchangeable with
-  // CUstream
   nvdec_output_stream_ = get_current_cuda_stream(device_.index());
-  proc_params.output_stream = reinterpret_cast<CUstream>(nvdec_output_stream_);
 
   CUdeviceptr frame_ptr = 0;
   unsigned int pitch = 0;
@@ -852,14 +846,9 @@ int BetaCudaDeviceInterface::receive_frame(UniqueAVFrame& av_frame) {
   // Those reads are asynchronous, so we must wait on them to finish.
   surface_read_done_.make_stream_wait(nvdec_output_stream_);
   unmap_previous_frame();
-  CUresult result = cuvidMapVideoFrame(
-      *decoder_.get(),
-      disp_info.picture_index,
-      &frame_ptr,
-      &pitch,
-      &proc_params);
-  if (result != CUDA_SUCCESS) {
-    return AVERROR_EXTERNAL;
+  int status = map_frame(disp_info, nvdec_output_stream_, frame_ptr, pitch);
+  if (status != AVSUCCESS) {
+    return status;
   }
   previously_mapped_frame_ = frame_ptr;
 
@@ -876,6 +865,28 @@ void BetaCudaDeviceInterface::record_surface_read(cudaStream_t stream) {
   // This sets the surface_read_done_ event that must be waited upon before
   // mapping a new frame on the surface.
   surface_read_done_.record(stream);
+}
+
+int BetaCudaDeviceInterface::map_frame(
+    const CUVIDPARSERDISPINFO& disp_info,
+    cudaStream_t stream,
+    CUdeviceptr& frame_ptr,
+    unsigned int& pitch) {
+  CUVIDPROCPARAMS proc_params = {};
+  proc_params.progressive_frame = disp_info.progressive_frame;
+  proc_params.top_field_first = disp_info.top_field_first;
+  proc_params.unpaired_field = disp_info.repeat_first_field < 0;
+  // Re types: we get a cudaStream_t from PyTorch but it's interchangeable with
+  // CUstream.
+  proc_params.output_stream = reinterpret_cast<CUstream>(stream);
+
+  CUresult result = cuvidMapVideoFrame(
+      *decoder_.get(),
+      disp_info.picture_index,
+      &frame_ptr,
+      &pitch,
+      &proc_params);
+  return result == CUDA_SUCCESS ? AVSUCCESS : AVERROR_EXTERNAL;
 }
 
 void BetaCudaDeviceInterface::unmap_previous_frame() {
@@ -937,7 +948,7 @@ UniqueAVFrame BetaCudaDeviceInterface::convert_cuda_frame_to_av_frame(
   av_frame->format = surface_to_pix_fmt(
       surface_format_,
       static_cast<int>(video_format_.bit_depth_luma_minus8) + 8);
-  av_frame->pts = disp_info.timestamp;
+  av_frame->pts = get_timestamp(disp_info);
 
   // TODONVDEC P2: We compute the duration based on average frame rate info, so
   // so if the video has variable frame rate, the durations may be off. We

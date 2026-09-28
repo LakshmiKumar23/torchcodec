@@ -20,18 +20,17 @@
 #include "DeviceInterface.h"
 #include "FFMPEGCommon.h"
 #include "NVDECCache.h"
+#include "NvcuvidCompat.h"
 #include "Transform.h"
 #include "color_conversion.h"
 
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
-#include "nvcuvid_include/cuviddec.h"
-#include "nvcuvid_include/nvcuvid.h"
 
 namespace facebook::torchcodec {
 // The buffer a frame owns its samples in, hung off the AVFrame as opaque data.
@@ -85,11 +84,47 @@ class BetaCudaDeviceInterface : public DeviceInterface {
 
   std::string get_details() override;
 
- private:
-  enum class Mode { Uninitialized, DecoderOnly, ColorConverterOnly, Both };
-  Mode mode() const;
+ protected:
+  /* clang-format off */
+  // Note: [The one hardware-decoder seam]
+  //
+  // BetaRocmDeviceInterface will derive from this class and decode with
+  // rocDecode instead of NVDEC. Of the nine NVCUVID entry points this class
+  // calls, eight have a 1:1 rocDecode counterpart taking the same arguments in
+  // the same order, so the ROCm build will satisfy them with thin forwarders
+  // rather than by overriding anything - see Note: [Compiling
+  // BetaCudaDeviceInterface for both NVDEC and rocDecode] in NvcuvidCompat.h
+  // for how the types line up. That is why the whole send/receive state
+  // machine, the frame re-ordering, the cropping and the color conversion below
+  // are shared verbatim, with no subclass involvement at all.
+  //
+  // cuvidMapVideoFrame() is the ninth, and it's why this class needs a subclass
+  // rather than only a compat header. Its contract is one device
+  // pointer plus one pitch, from which the shared code derives the chroma
+  // planes arithmetically. rocDecGetVideoFrame() instead returns *three*
+  // pointers and *three* pitches, one per plane, and does not promise they are
+  // contiguous or share a pitch. Forwarding it would mean discarding two thirds
+  // of its output and assuming a layout AMD never guaranteed - which would show
+  // up as silently wrong chroma, not as a failure. So the mapping is virtual,
+  // and the ROCm override keeps all three planes.
+  //
+  // rocDecode reclaims surfaces internally and has no unmap entry point at all,
+  // so cuvidUnmapVideoFrame() forwards to nothing and unmap_previous_frame()
+  // stays non-virtual.
+  /* clang-format on */
+
+  // Makes a decoded frame addressable, on `stream`. Returns an FFmpeg error
+  // code; frame_ptr and pitch are only valid on AVSUCCESS.
+  virtual int map_frame(
+      const CUVIDPARSERDISPINFO& disp_info,
+      cudaStream_t stream,
+      CUdeviceptr& frame_ptr,
+      unsigned int& pitch);
 
   int send_cuvid_packet(CUVIDSOURCEDATAPACKET& cuvid_packet);
+
+  enum class Mode { Uninitialized, DecoderOnly, ColorConverterOnly, Both };
+  Mode mode() const;
 
   void send_seqhdr_packet();
 

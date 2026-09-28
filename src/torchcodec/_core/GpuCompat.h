@@ -64,12 +64,45 @@
 using cudaStream_t = hipStream_t;
 using cudaEvent_t = hipEvent_t;
 using cudaError_t = hipError_t;
+using cudaMemcpyKind = hipMemcpyKind;
 
 constexpr hipError_t cudaSuccess = hipSuccess;
 constexpr unsigned int cudaEventDisableTiming = hipEventDisableTiming;
+constexpr hipMemcpyKind cudaMemcpyDeviceToDevice = hipMemcpyDeviceToDevice;
+constexpr hipMemcpyKind cudaMemcpyHostToDevice = hipMemcpyHostToDevice;
 
 inline cudaError_t cudaGetDevice(int* device) {
   return hipGetDevice(device);
+}
+
+inline cudaError_t cudaFree(void* ptr) {
+  return hipFree(ptr);
+}
+
+inline cudaError_t cudaStreamSynchronize(cudaStream_t stream) {
+  return hipStreamSynchronize(stream);
+}
+
+inline cudaError_t cudaMemcpyAsync(
+    void* dst,
+    const void* src,
+    size_t count,
+    cudaMemcpyKind kind,
+    cudaStream_t stream) {
+  return hipMemcpyAsync(dst, src, count, kind, stream);
+}
+
+inline cudaError_t cudaMemcpy2DAsync(
+    void* dst,
+    size_t dpitch,
+    const void* src,
+    size_t spitch,
+    size_t width,
+    size_t height,
+    cudaMemcpyKind kind,
+    cudaStream_t stream) {
+  return hipMemcpy2DAsync(
+      dst, dpitch, src, spitch, width, height, kind, stream);
 }
 
 inline const char* cudaGetErrorString(cudaError_t error) {
