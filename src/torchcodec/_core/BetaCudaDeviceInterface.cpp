@@ -19,12 +19,10 @@
 #include "NVDECCache.h"
 
 #include "NVCUVIDRuntimeLoader.h"
+#include "NvcuvidCompat.h"
 #include "color_conversion.h"
-#include "nvcuvid_include/cuviddec.h"
-#include "nvcuvid_include/nvcuvid.h"
 
 extern "C" {
-#include <libavutil/hwcontext_cuda.h>
 #include <libavutil/pixdesc.h>
 }
 
@@ -133,11 +131,22 @@ bool is_expected_pix_fmt_from_nvdec(AVPixelFormat pix_fmt) {
       pix_fmt == AV_PIX_FMT_YUV444P || pix_fmt == AV_PIX_FMT_YUV444P16LE;
 }
 
+#if defined(USE_ROCM)
+// The ROCm build compiles this file too, but does not register this class: the
+// (kCUDA, "default") key belongs to the ROCm interface, which derives from this
+// one and registers itself. Claiming the key here as well would trip the
+// duplicate-key STD_TORCH_CHECK in register_device_interface() during static
+// initialization, i.e. at `import torchcodec`. The flag is still defined and
+// true so that the constructor's assertion below keeps its meaning: this class
+// is reachable, just not as an interface in its own right.
+static bool g_cuda_nvdec = true;
+#else
 static bool g_cuda_nvdec = register_device_interface(
     DeviceInterfaceKey(kStableCUDA, /*variant=*/"default"),
     [](const StableDevice& device) {
       return new BetaCudaDeviceInterface(device);
     });
+#endif
 
 static int CUDAAPI
 pfn_sequence_callback(void* p_user_data, CUVIDEOFORMAT* video_format) {
@@ -372,7 +381,10 @@ class CudaContextGuard {
   // in a different thread that doesn't have the context.
  public:
   explicit CudaContextGuard(int device_index) : device_guard_(device_index) {
-    cudaFree(nullptr);
+    // The status is intentionally dropped: this call exists only for its side
+    // effect of binding a context. The cast is a no-op on CUDA and silences
+    // hipError_t's [[nodiscard]] on ROCm.
+    (void)cudaFree(nullptr);
   }
 
  private:
@@ -1544,3 +1556,170 @@ std::string BetaCudaDeviceInterface::get_details() {
 }
 
 } // namespace facebook::torchcodec
+
+#if defined(USE_ROCM)
+
+/* clang-format off */
+// Note: [Implementing the NVCUVID entry points on top of rocDecode]
+//
+// Everything above this line is the NVDEC implementation, unchanged and
+// untouched by the ROCm port. It calls nine NVCUVID entry points. On CUDA
+// those resolve to the forwarders in NVCUVIDRuntimeLoader.cpp, which dlopen
+// libnvcuvid.so; on ROCm they resolve to the definitions below, which call
+// rocDecode. The rocDec* functions called below are themselves forwarders in
+// that same file (see [Loading rocDecode at runtime]): neither build links its
+// vendor decode library, so on either platform a missing driver library is a
+// CPU fallback rather than an `import torchcodec` failure.
+//
+// Seven of the nine are genuine 1:1 forwards - AMD modelled the API closely
+// enough that the only work is copying NVIDIA-named fields into snake_case
+// ones (see [The four carrier structs] in NvcuvidCompat.h). The two
+// exceptions:
+//
+// - cuvidMapVideoFrame is a stub that fails. rocDecGetVideoFrame returns
+//   three plane pointers and three pitches with no promise that the planes
+//   are contiguous or share a pitch, where NVCUVID returns one of each and
+//   lets the caller derive the chroma planes arithmetically. Forwarding it
+//   would mean discarding two thirds of the output and assuming a layout AMD
+//   never guaranteed, and the failure mode is silently wrong chroma rather
+//   than a crash - which would defeat the whole point of sharing the color
+//   conversion kernels. BetaRocmDeviceInterface overrides map_frame()
+//   instead, so this is never called; it exists so the base class body still
+//   links.
+//
+// - cuvidUnmapVideoFrame succeeds without doing anything. rocDecode has no
+//   unmap entry point at all: a surface is released when the decoder is
+//   asked for the next one. That is why unmap_previous_frame() did not need
+//   to become virtual.
+//
+// The remaining asymmetry is the device. NVCUVID takes it from the current
+// CUDA context; rocDecode wants it named in each create/query call.
+/* clang-format on */
+
+namespace {
+
+uint8_t current_rocm_device_id() {
+  int device = 0;
+  cudaError_t err = cudaGetDevice(&device);
+  STD_TORCH_CHECK(
+      err == cudaSuccess,
+      "Failed to query the current HIP device: ",
+      cudaGetErrorString(err));
+  return static_cast<uint8_t>(device);
+}
+
+} // namespace
+
+CUresult cuvidGetDecoderCaps(CUVIDDECODECAPS* caps) {
+  RocdecDecodeCaps rocdec_caps = {};
+  rocdec_caps.device_id = current_rocm_device_id();
+  rocdec_caps.codec_type = caps->eCodecType;
+  rocdec_caps.chroma_format = caps->eChromaFormat;
+  rocdec_caps.bit_depth_minus_8 = caps->nBitDepthMinus8;
+
+  CUresult result = rocDecGetDecoderCaps(&rocdec_caps);
+  if (result != CUDA_SUCCESS) {
+    return result;
+  }
+
+  caps->bIsSupported = rocdec_caps.is_supported;
+  caps->nOutputFormatMask = rocdec_caps.output_format_mask;
+  caps->nMaxWidth = rocdec_caps.max_width;
+  caps->nMaxHeight = rocdec_caps.max_height;
+  caps->nMinWidth = rocdec_caps.min_width;
+  caps->nMinHeight = rocdec_caps.min_height;
+
+  // rocDecode publishes no macroblock-count cap. Report the largest count the
+  // dimension limits just above already permit, so the nMaxMBCount check in
+  // the shared code becomes redundant instead of rejecting frames AMD would
+  // decode happily. Rounding up matters: 1920x1080 is 8100 macroblocks, which
+  // a (max_width / 16) * (max_height / 16) form would understate as 8040.
+  caps->nMaxMBCount = static_cast<unsigned int>(
+      (static_cast<uint64_t>(caps->nMaxWidth) * caps->nMaxHeight + 255) / 256);
+  return result;
+}
+
+CUresult cuvidCreateDecoder(
+    CUvideodecoder* decoder,
+    CUVIDDECODECREATEINFO* create_info) {
+  RocDecoderCreateInfo info = {};
+  info.device_id = current_rocm_device_id();
+  info.width = static_cast<uint32_t>(create_info->ulWidth);
+  info.height = static_cast<uint32_t>(create_info->ulHeight);
+  info.num_decode_surfaces =
+      static_cast<uint32_t>(create_info->ulNumDecodeSurfaces);
+  info.codec_type = create_info->CodecType;
+  info.chroma_format = create_info->ChromaFormat;
+  info.bit_depth_minus_8 = static_cast<uint32_t>(create_info->bitDepthMinus8);
+  info.output_format = create_info->OutputFormat;
+  info.max_width = static_cast<uint32_t>(create_info->ulMaxWidth);
+  info.max_height = static_cast<uint32_t>(create_info->ulMaxHeight);
+  info.target_width = static_cast<uint32_t>(create_info->ulTargetWidth);
+  info.target_height = static_cast<uint32_t>(create_info->ulTargetHeight);
+  info.num_output_surfaces =
+      static_cast<uint32_t>(create_info->ulNumOutputSurfaces);
+  info.display_rect.left = create_info->display_area.left;
+  info.display_rect.top = create_info->display_area.top;
+  info.display_rect.right = create_info->display_area.right;
+  info.display_rect.bottom = create_info->display_area.bottom;
+  // create_info->ulCreationFlags is always cudaVideoCreate_Default and has no
+  // rocDecode counterpart. intra_decode_only and target_rect stay zeroed, as
+  // they are on the NVDEC side.
+  return rocDecCreateDecoder(decoder, &info);
+}
+
+CUresult cuvidDestroyDecoder(CUvideodecoder decoder) {
+  return rocDecDestroyDecoder(decoder);
+}
+
+CUresult cuvidCreateVideoParser(
+    CUvideoparser* parser,
+    CUVIDPARSERPARAMS* parser_params) {
+  RocdecParserParams params = {};
+  params.codec_type = parser_params->CodecType;
+  params.max_num_decode_surfaces = parser_params->ulMaxNumDecodeSurfaces;
+  params.max_display_delay = parser_params->ulMaxDisplayDelay;
+  params.user_data = parser_params->pUserData;
+  // These four types are rocparser.h's own, and once CUVIDEOFORMAT and friends
+  // are aliased they have the same signatures as NVCUVID's. The callbacks in
+  // BetaCudaDeviceInterface need no adaptation.
+  params.pfn_sequence_callback = parser_params->pfnSequenceCallback;
+  params.pfn_decode_picture = parser_params->pfnDecodePicture;
+  params.pfn_display_picture = parser_params->pfnDisplayPicture;
+  params.ext_video_info = parser_params->pExtVideoInfo;
+  return rocDecCreateVideoParser(parser, &params);
+}
+
+CUresult cuvidDestroyVideoParser(CUvideoparser parser) {
+  return rocDecDestroyVideoParser(parser);
+}
+
+CUresult cuvidParseVideoData(
+    CUvideoparser parser,
+    CUVIDSOURCEDATAPACKET* packet) {
+  return rocDecParseVideoData(parser, packet);
+}
+
+CUresult cuvidDecodePicture(
+    CUvideodecoder decoder,
+    CUVIDPICPARAMS* pic_params) {
+  return rocDecDecodeFrame(decoder, pic_params);
+}
+
+// Never called: BetaRocmDeviceInterface overrides map_frame(). See the note
+// above for why forwarding this to rocDecGetVideoFrame would be wrong.
+CUresult cuvidMapVideoFrame(
+    CUvideodecoder,
+    int,
+    CUdeviceptr*,
+    unsigned int*,
+    CUVIDPROCPARAMS*) {
+  return ROCDEC_NOT_IMPLEMENTED;
+}
+
+// rocDecode releases the previous surface itself; there is nothing to unmap.
+CUresult cuvidUnmapVideoFrame(CUvideodecoder, CUdeviceptr) {
+  return CUDA_SUCCESS;
+}
+
+#endif // USE_ROCM

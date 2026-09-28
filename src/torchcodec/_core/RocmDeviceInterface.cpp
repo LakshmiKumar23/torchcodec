@@ -23,11 +23,15 @@ namespace {
 
 // Register ROCm device interface with the default "ffmpeg" variant.
 // Note: ROCm uses torch::kCUDA device type (PyTorch uses "cuda" for both NVIDIA
-// and AMD). This doesn't conflict with CUDA's default variant because
-// ENABLE_CUDA and ENABLE_ROCM are mutually exclusive build flags - only one
-// backend is compiled at a time.
+// and AMD). This doesn't conflict with CudaDeviceInterface because ENABLE_CUDA
+// and ENABLE_ROCM are mutually exclusive build flags - only one backend is
+// compiled at a time. It would conflict with BetaCudaDeviceInterface, which the
+// ROCm build does compile and which claims the same key, so that one does not
+// register itself on ROCm.
 static bool g_rocm = register_device_interface(
-    DeviceInterfaceKey(c10::kCUDA), // Uses default variant "ffmpeg"
+    // The one-argument key constructor leaves variant at its default, which is
+    // the string "default" - not "ffmpeg".
+    DeviceInterfaceKey(c10::kCUDA),
     [](const StableDevice& device) { return new RocmDeviceInterface(device); });
 
 // C callbacks for rocDecode parser

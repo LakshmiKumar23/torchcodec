@@ -53,17 +53,20 @@
 //   surface layout as a CUDA one and the shared color-conversion kernels stay
 //   bit-exact across backends.
 //
-// NOT aliased, because the values genuinely differ: cudaVideoCodec. NVCUVID
-// numbers HEVC 8, where rocDecode numbers JPEG 8 - a cast between them is a
-// silent wrong-codec bug. Each backend maps from AVCodecID itself, and the
-// native codec enum never crosses into shared code.
+// - cudaVideoCodec is aliased too, but it is the one alias that must never be
+//   read as a conversion. NVCUVID numbers HEVC 8 where rocDecode numbers JPEG
+//   8, so casting a value from one enum to the other is a silent wrong-codec
+//   bug. The alias exists only because shared code *names* the type:
+//   DecoderCapsCache's key, get_decoder_caps()'s parameters, and
+//   validate_codec_support()'s return type. On each backend the name resolves
+//   to that backend's own enum, and no value ever crosses, because the only
+//   two producers are validate_codec_support() - which maps from AVCodecID and
+//   belongs to whichever backend is compiled - and video_format->codec, which
+//   is already native here since CUVIDEOFORMAT *is* RocdecVideoFormat.
 //
-// Also not aliased: CUVIDDECODECREATEINFO, CUVIDPARSERPARAMS, CUVIDPROCPARAMS
-// and CUVIDDECODECAPS, whose rocDecode equivalents carry the same information
-// under snake_case names and with a few fields added or missing. Those are
-// named only by the code that sets up or drives a decoder, which each backend
-// owns outright; none of them appear in this class's shared members or in any
-// signature crossing between the two.
+// CUVIDDECODECREATEINFO, CUVIDPARSERPARAMS, CUVIDPROCPARAMS and
+// CUVIDDECODECAPS are the four that cannot be aliased at all; see the note on
+// the carrier structs further down.
 /* clang-format on */
 
 #if defined(USE_ROCM)
@@ -113,6 +116,155 @@ constexpr cudaVideoSurfaceFormat cudaVideoSurfaceFormat_YUV444_16Bit =
 
 constexpr uint32_t CUVID_PKT_ENDOFSTREAM = ROCDEC_PKT_ENDOFSTREAM;
 constexpr uint32_t CUVID_PKT_TIMESTAMP = ROCDEC_PKT_TIMESTAMP;
+
+// See the note above on why naming this type is safe and converting it is not.
+using cudaVideoCodec = rocDecVideoCodec;
+
+// The enumerators torchcodec names, mapped by meaning rather than by value:
+// these are the six codecs validate_codec_support() can return. The mapping is
+// not the identity - NVCUVID numbers H264 4 and HEVC 8, rocDecode numbers AVC 3
+// and HEVC 4 - which is exactly why it has to be spelled out once here instead
+// of being cast anywhere. With this table validate_codec_support() needs no
+// per-backend variant: it keeps returning the CUDA spelling and each build
+// resolves it to its own native enumerator.
+constexpr cudaVideoCodec cudaVideoCodec_MPEG4 = rocDecVideoCodec_MPEG4;
+constexpr cudaVideoCodec cudaVideoCodec_H264 = rocDecVideoCodec_AVC;
+constexpr cudaVideoCodec cudaVideoCodec_HEVC = rocDecVideoCodec_HEVC;
+constexpr cudaVideoCodec cudaVideoCodec_AV1 = rocDecVideoCodec_AV1;
+constexpr cudaVideoCodec cudaVideoCodec_VP8 = rocDecVideoCodec_VP8;
+constexpr cudaVideoCodec cudaVideoCodec_VP9 = rocDecVideoCodec_VP9;
+
+// The calling-convention macro the NVCUVID callback signatures carry. Both
+// expand to nothing on Linux, but keep the indirection so the shared code
+// never has to care which header it came from.
+#define CUDAAPI ROCDECAPI
+
+// Every NVCUVID entry point returns CUresult; every rocDecode one returns
+// rocDecStatus. Both are enums whose success value is 0, and the shared code
+// only ever compares against success or prints the value in an error message.
+using CUresult = rocDecStatus;
+constexpr CUresult CUDA_SUCCESS = ROCDEC_SUCCESS;
+
+// The driver-API stream handle. GpuCompat.h aliases the runtime-API one
+// (cudaStream_t) to the same HIP type, which is what makes the
+// reinterpret_cast in map_frame() a no-op here rather than a reinterpretation.
+using CUstream = hipStream_t;
+
+// NVCUVID's only decoder creation flag that torchcodec sets. rocDecode has no
+// equivalent knob - it always picks the hardware path - so this is inert.
+constexpr unsigned long cudaVideoCreate_Default = 0;
+
+/* clang-format off */
+// Note: [The four carrier structs]
+//
+// Unlike everything above, these four have no field names in common with
+// their rocDecode counterparts. They carry exactly the same information, but
+// NVIDIA spells it ulWidth / CodecType / bitDepthMinus8 where rocDecode
+// spells it width / codec_type / bit_depth_minus_8. A type alias would
+// therefore break every assignment in create_decoder(),
+// initialize_video_decoding(), DecoderCapsCache and map_frame() - the NVDEC
+// code we are deliberately not touching.
+//
+// So on ROCm they are declared here as plain carrier structs wearing NVIDIA's
+// field names, holding only the fields torchcodec actually sets or reads, and
+// typed as NVIDIA types them so that every assignment, cast and comparison in
+// the shared code behaves identically on both backends. No AMD driver ever
+// sees one: the forwarders at the end of BetaCudaDeviceInterface.cpp copy them
+// field-by-field into the real rocDecode struct at the point of the call.
+//
+// Keep these in sync with what the shared code touches. A field that is never
+// assigned is a field the forwarder would have to invent a value for, so the
+// omissions are deliberate - notably ulIntraDecodeOnly, DeinterlaceMode,
+// vidLock and target_rect on the create-info, which torchcodec leaves zeroed.
+/* clang-format on */
+
+// IN fields are read by the forwarder; OUT fields are written by it.
+struct CUVIDDECODECAPS {
+  cudaVideoCodec eCodecType; // IN
+  cudaVideoChromaFormat eChromaFormat; // IN
+  unsigned int nBitDepthMinus8; // IN
+  unsigned char bIsSupported; // OUT
+  unsigned short nOutputFormatMask; // OUT: bit per cudaVideoSurfaceFormat
+  unsigned int nMaxWidth; // OUT
+  unsigned int nMaxHeight; // OUT
+  unsigned int nMaxMBCount; // OUT: see the forwarder, rocDecode has no such cap
+  unsigned short nMinWidth; // OUT
+  unsigned short nMinHeight; // OUT
+};
+
+struct CUVIDDECODECREATEINFO {
+  unsigned long ulWidth;
+  unsigned long ulHeight;
+  unsigned long ulNumDecodeSurfaces;
+  cudaVideoCodec CodecType;
+  cudaVideoChromaFormat ChromaFormat;
+  unsigned long ulCreationFlags;
+  unsigned long bitDepthMinus8;
+  unsigned long ulMaxWidth;
+  unsigned long ulMaxHeight;
+
+  struct {
+    short left;
+    short top;
+    short right;
+    short bottom;
+  } display_area;
+
+  cudaVideoSurfaceFormat OutputFormat;
+  unsigned long ulTargetWidth;
+  unsigned long ulTargetHeight;
+  unsigned long ulNumOutputSurfaces;
+};
+
+// The callback types are rocparser.h's own: they are declared with the same
+// names and, once CUVIDEOFORMAT and friends are aliased above, the same
+// signatures. The parser callbacks in BetaCudaDeviceInterface need no
+// adaptation at all.
+struct CUVIDPARSERPARAMS {
+  cudaVideoCodec CodecType;
+  unsigned int ulMaxNumDecodeSurfaces;
+  unsigned int ulMaxDisplayDelay;
+  void* pUserData;
+  PFNVIDSEQUENCECALLBACK pfnSequenceCallback;
+  PFNVIDDECODECALLBACK pfnDecodePicture;
+  PFNVIDDISPLAYCALLBACK pfnDisplayPicture;
+  CUVIDEOFORMATEX* pExtVideoInfo;
+};
+
+// RocdecProcParams has progressive_frame and top_field_first but neither
+// unpaired_field nor output_stream, which is why map_frame() takes the stream
+// as an argument instead of passing it through here. This struct is only ever
+// filled by the base map_frame(), which BetaRocmDeviceInterface overrides.
+struct CUVIDPROCPARAMS {
+  int progressive_frame;
+  int top_field_first;
+  int unpaired_field;
+  CUstream output_stream;
+};
+
+// The NVCUVID entry points, as implemented for rocDecode. Definitions live in
+// the USE_ROCM block at the end of BetaCudaDeviceInterface.cpp; seven of the
+// nine are 1:1 forwards, and that block explains the two that are not.
+CUresult cuvidGetDecoderCaps(CUVIDDECODECAPS* caps);
+CUresult cuvidCreateDecoder(
+    CUvideodecoder* decoder,
+    CUVIDDECODECREATEINFO* create_info);
+CUresult cuvidDestroyDecoder(CUvideodecoder decoder);
+CUresult cuvidCreateVideoParser(
+    CUvideoparser* parser,
+    CUVIDPARSERPARAMS* parser_params);
+CUresult cuvidDestroyVideoParser(CUvideoparser parser);
+CUresult cuvidParseVideoData(
+    CUvideoparser parser,
+    CUVIDSOURCEDATAPACKET* packet);
+CUresult cuvidDecodePicture(CUvideodecoder decoder, CUVIDPICPARAMS* pic_params);
+CUresult cuvidMapVideoFrame(
+    CUvideodecoder decoder,
+    int pic_index,
+    CUdeviceptr* frame_ptr,
+    unsigned int* pitch,
+    CUVIDPROCPARAMS* proc_params);
+CUresult cuvidUnmapVideoFrame(CUvideodecoder decoder, CUdeviceptr frame_ptr);
 
 #else
 

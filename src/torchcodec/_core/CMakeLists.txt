@@ -373,7 +373,15 @@ function(make_torchcodec_libraries
     endif()
 
     if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
+        enable_language(HIP)
         list(APPEND core_sources ${TORCHCODEC_DECODER_CORE_ROCM_SOURCES})
+        # The color conversion kernels are shared with the CUDA build and so are
+        # named .cu. CMake maps that extension to the CUDA language, which is not
+        # enabled here, so the language has to be set explicitly.
+        set_source_files_properties(
+            color_conversion.cu
+            PROPERTIES LANGUAGE HIP
+        )
     endif()
 
     set(core_library_dependencies
@@ -405,16 +413,27 @@ function(make_torchcodec_libraries
     endif()
 
     if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
-        # Link ROCm libraries and add include directories
+        # Link ROCm libraries and add include directories.
+        #
+        # rocdecode::rocdecode is deliberately NOT linked. librocdecode.so.1 is
+        # packaged separately from the HIP runtime, and a DT_NEEDED entry for it
+        # would make `import torchcodec` fail outright on a machine that does not
+        # have it - taking CPU decoding down with it. We dlopen it on first use
+        # instead and fall back to CPU when it is absent, which is exactly what
+        # the CUDA build does with libnvcuvid.so. See [Loading rocDecode at
+        # runtime] in NVCUVIDRuntimeLoader.cpp. Only the headers are needed here.
         target_link_libraries(${core_library_name} PRIVATE
             hip::host
             rpp::rpp
-            rocdecode::rocdecode
         )
-        target_include_directories(${core_library_name} PRIVATE
+        # SYSTEM, because rocparser.h uses an anonymous type inside an anonymous
+        # union, which our -Wall -Wextra -pedantic -Werror build otherwise
+        # rejects with -Wnested-anon-types.
+        target_include_directories(${core_library_name} SYSTEM PRIVATE
             "${rocdecode_INCLUDE_DIR}"
         )
         target_compile_definitions(${core_library_name} PRIVATE USE_ROCM)
+        set_property(TARGET ${core_library_name} PROPERTY HIP_STANDARD 17)
     endif()
 
     # 2. Create libtorchcodec_custom_opsN.{ext}.

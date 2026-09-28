@@ -10,7 +10,7 @@
 #include <atomic>
 #include <mutex>
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 #include "CUDACommon.h"
 #include "NVDECCache.h"
 #endif
@@ -35,7 +35,7 @@ void set_nvdec_cache_capacity(int capacity) {
       capacity);
   std::lock_guard<std::mutex> lock(g_nvdecCacheCapacityMutex);
   g_nvdecCacheCapacity.store(capacity);
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
   NVDECCache::evict_excess_entries_across_devices(capacity);
 #endif
 }
@@ -45,7 +45,7 @@ int get_nvdec_cache_capacity() {
 }
 
 int get_nvdec_cache_size([[maybe_unused]] int device_index) {
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
   STD_TORCH_CHECK(
       device_index >= 0 && device_index < MAX_CUDA_GPUS,
       "device_index must be between 0 and ",
