@@ -373,7 +373,9 @@ function(make_torchcodec_libraries
     endif()
 
     if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
-        enable_language(HIP)
+        # Note that the HIP language itself is enabled at file scope, near the
+        # bottom of this file - see the comment there for why it cannot live
+        # here with the rest of the ROCm setup.
         list(APPEND core_sources ${TORCHCODEC_DECODER_CORE_ROCM_SOURCES})
         # The color conversion kernels are shared with the CUDA build and so are
         # named .cu. CMake maps that extension to the CUDA language, which is not
@@ -778,6 +780,33 @@ endfunction()
 make_torchcodec_image_library()
 make_torchcodec_pybind_library()
 make_torchcodec_heic_library()
+
+# HIP has to be enabled here rather than next to the rest of the ROCm setup in
+# make_torchcodec_libraries(). enable_language() "must be called in file scope,
+# not in a function call": it defines the language's internal variables in the
+# calling scope, so a call inside a function is discarded when the function
+# returns, and generation then fails with
+#     Error required internal CMake variable not set [...]
+#     Missing variable is: CMAKE_HIP_COMPILE_OBJECT
+# check_language() is the documented way to probe first, since enable_language's
+# OPTIONAL keyword does not actually work. Without it, a machine that sets
+# ENABLE_ROCM but has no hipcc would hard-error here instead of configuring a
+# build without ROCm support, which is how the missing-dependency path below
+# behaves.
+if(ENABLE_ROCM)
+    include(CheckLanguage)
+    check_language(HIP)
+    if(CMAKE_HIP_COMPILER)
+        enable_language(HIP)
+    else()
+        message(
+            WARNING
+            "ENABLE_ROCM is set but CMake could not find a HIP compiler. "
+            "Skipping ROCm support. Set ROCM_PATH if CMake cannot find your ROCm install."
+        )
+        set(ENABLE_ROCM OFF)
+    endif()
+endif()
 
 if(DEFINED ENV{BUILD_AGAINST_ALL_FFMPEG_FROM_S3})
     message(
