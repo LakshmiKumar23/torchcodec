@@ -166,6 +166,26 @@ class BetaCudaDeviceInterface : public DeviceInterface {
     return static_cast<int>(video_format_.coded_height);
   }
 
+  // Number of luma rows one plane occupies in the surface allocation. This is
+  // what separates one plane from the next: the planes are stacked in a single
+  // allocation, so plane i begins pitch * plane_rows() bytes in.
+  //
+  // NVDEC stacks them at the coded height, rounded up to even. That is not a
+  // universal truth, though - it is a property of whoever allocated the
+  // surface, and a backend whose allocator pads the luma plane further has to
+  // say so.
+  //
+  // rocDecode is such a backend, which is why this is virtual. Its surfaces
+  // come from the VA-API driver, which pads the luma plane up to its own
+  // alignment: a 200-row HEVC frame gets a 208-row luma plane, so chroma
+  // starts 8 rows later than this formula would predict.
+  // BetaRocmDeviceInterface overrides this with the offsets the driver itself
+  // reports, rather than guessing at the alignment. See Note: [Mapping a
+  // rocDecode surface].
+  virtual int plane_rows() const {
+    return round_up_to_even(surface_height());
+  }
+
   struct CropOffsets {
     unsigned int luma;
     unsigned int chroma;

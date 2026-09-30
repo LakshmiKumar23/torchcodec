@@ -72,18 +72,36 @@ static DecoderCapsCache& get_decoder_caps_cache() {
 
 // NVDEC's output surface formats come in a 4:2:0 and a 4:4:4 flavour, each with
 // an 8-bit and a 16-bit variant. We decode on the surface that respects the
-// source chroma, but we don't respect the source bit depth and instead try to
-// honor the user's requested output dtype:
-// - if the user wants uint8 output, we try to decode on a uint8 surface,
-//   including for >8bit sources. It's not always supported by NVDEC, so the
-//   caller must fallback to the >8bit surface in such case.
-// - similarly if the user wants float32 output, we try to decode on a >8bit
-//   surface, including for 8bit sources. The caller must handle a similar
-//   fallback.
+// source chroma and the source bit depth, and beyond that try to honor the
+// user's requested output dtype:
+// - if the user wants uint8 output from an 8bit source, we decode on a uint8
+//   surface. It's not always supported, so the caller must fallback to the
+//   >8bit surface in such case.
+// - if the user wants float32 output, we try to decode on a >8bit surface,
+//   including for 8bit sources. The caller must handle a similar fallback.
+//
+// What we never do is ask for an 8-bit surface for a >8bit source. A decoder
+// that accepts such a request honors it by truncating in hardware, and we'd
+// then be color-converting samples that had already lost their low bits. When
+// uint8 output is what was asked for we do have to reach 8 bits eventually,
+// but that belongs after color conversion, in code both backends share -
+// exactly as upload_cpu_frame_to_gpu() already argues for the CPU path.
+//
+// This is not academic. rocDecode reports a bit-depth-independent format mask:
+// bit_depth_minus_8 only gates is_supported, while output_format_mask is
+// copied from the VA-API surface attributes for the whole context, which list
+// NV12 alongside P010. So a 10-bit HEVC stream was being decoded onto NV12 and
+// truncated by VCN. Asking for the source's depth makes the choice follow the
+// content rather than whatever each vendor happens to advertise, which is what
+// keeps the two backends on the same path.
+//
+// Note this does not change the output dtype: a uint8 request still yields a
+// uint8 tensor, the narrowing just happens in our kernel now.
 cudaVideoSurfaceFormat get_preferred_surface_format(
     cudaVideoChromaFormat chroma_format,
-    OutputDtype output_dtype) {
-  bool want_uint8 = output_dtype == OutputDtype::UINT8;
+    OutputDtype output_dtype,
+    unsigned int bit_depth_minus8) {
+  bool want_uint8 = output_dtype == OutputDtype::UINT8 && bit_depth_minus8 == 0;
   if (chroma_format == cudaVideoChromaFormat_444) {
     return want_uint8 ? cudaVideoSurfaceFormat_YUV444
                       : cudaVideoSurfaceFormat_YUV444_16Bit;
@@ -313,8 +331,8 @@ std::optional<cudaVideoSurfaceFormat> get_nvdec_surface_format(
     return std::nullopt;
   }
 
-  auto preferred_format =
-      get_preferred_surface_format(chroma_format.value(), output_dtype);
+  auto preferred_format = get_preferred_surface_format(
+      chroma_format.value(), output_dtype, bit_depth_minus8);
 
   auto is_supported = [&](cudaVideoSurfaceFormat format) {
     return ((caps.nOutputFormatMask >> format) & 1) != 0;
@@ -326,11 +344,17 @@ std::optional<cudaVideoSurfaceFormat> get_nvdec_surface_format(
 
   // The preferred_format heuristic tries to take a shortcut that might cause us
   // to miss valid formats. We fallabck here:
-  // if source is 8bit we can try the 8bit surface.
+  // if surface is 16bit we can try the 8bit surface.
   // if surface is 8bit we can try the 16bit surface.
+  //
+  // For a >8bit source the narrower surface means the decoder truncates in
+  // hardware, which is what preferring the source's depth above exists to
+  // avoid. We still take it rather than return nullopt, because the
+  // alternative is giving up on hardware decode altogether: losing the low
+  // bits beats falling all the way back to the CPU. It only happens on
+  // hardware that offers no >8bit surface at all.
 
-  bool source_is_8_bits = bit_depth_minus8 == 0;
-  if (is_16bit_surface_format(preferred_format) && source_is_8_bits) {
+  if (is_16bit_surface_format(preferred_format)) {
     auto narrower = preferred_format == cudaVideoSurfaceFormat_YUV444_16Bit
         ? cudaVideoSurfaceFormat_YUV444
         : cudaVideoSurfaceFormat_NV12;
@@ -981,23 +1005,43 @@ UniqueAVFrame BetaCudaDeviceInterface::convert_cuda_frame_to_av_frame(
   // corresponding indices in the FFmpeg enum for colorspace conversion
   // (ff_yuv2rgb_coeffs):
   // https://ffmpeg.org/doxygen/trunk/yuv2rgb_8c_source.html#l00047
-  switch (video_format_.video_signal_description.matrix_coefficients) {
-    case 1:
-      av_frame->colorspace = AVCOL_SPC_BT709;
-      break;
-    case 6:
-      av_frame->colorspace = AVCOL_SPC_SMPTE170M; // BT.601
-      break;
-    case 9:
-      av_frame->colorspace = AVCOL_SPC_BT2020_NCL;
-      break;
-    case 10:
-      av_frame->colorspace = AVCOL_SPC_BT2020_CL;
-      break;
-    default:
-      // Default to BT.601
-      av_frame->colorspace = AVCOL_SPC_SMPTE170M;
-      break;
+  //
+  // A hardware parser does not always report this, though, and when it does
+  // not we can do better than the default below. Codes 0 and 2 both amount to
+  // "nothing was signalled", and in that case FFmpeg's own view of the stream
+  // is strictly more informative - it is also what the CPU decoder uses, so
+  // deferring to it is what keeps the two in agreement. The case that forced
+  // this: rocDecode's AV1 parser zeroes the whole video_signal_description and
+  // never fills it in (av1_parser.cpp), so every AV1 stream claims
+  // "unspecified" no matter what its sequence header actually said, and a
+  // BT.709 video would otherwise be converted with BT.601 coefficients.
+  int matrix_coefficients =
+      video_format_.video_signal_description.matrix_coefficients;
+  if ((matrix_coefficients == 0 || matrix_coefficients == 2) &&
+      codec_context_ != nullptr &&
+      codec_context_->colorspace != AVCOL_SPC_UNSPECIFIED) {
+    // Passed through as-is: get_luma_coefficients() falls back to BT.601 for
+    // anything it does not recognise, exactly as it does below.
+    av_frame->colorspace = codec_context_->colorspace;
+  } else {
+    switch (matrix_coefficients) {
+      case 1:
+        av_frame->colorspace = AVCOL_SPC_BT709;
+        break;
+      case 6:
+        av_frame->colorspace = AVCOL_SPC_SMPTE170M; // BT.601
+        break;
+      case 9:
+        av_frame->colorspace = AVCOL_SPC_BT2020_NCL;
+        break;
+      case 10:
+        av_frame->colorspace = AVCOL_SPC_BT2020_CL;
+        break;
+      default:
+        // Default to BT.601
+        av_frame->colorspace = AVCOL_SPC_SMPTE170M;
+        break;
+    }
   }
 
   av_frame->color_range =
@@ -1018,7 +1062,7 @@ UniqueAVFrame BetaCudaDeviceInterface::convert_cuda_frame_to_av_frame(
   // the same pitch, so consecutive planes start plane_stride bytes apart.
   // NVIDIA's own NvDecoder addresses the chroma plane the same way:
   // dpSrcFrame + srcPitch * ((surface_height + 1) & ~1).
-  unsigned int plane_stride = pitch * round_up_to_even(surface_height());
+  unsigned int plane_stride = pitch * plane_rows();
   bool is_444 = is_444_surface_format(surface_format_);
 
   CropOffsets crop_offsets = get_crop_offsets(pitch);
@@ -1151,11 +1195,10 @@ torch::stable::Tensor BetaCudaDeviceInterface::copy_nvdec_surface(
   //
   // where num_pixels = pitch * num_luma_plane_rows, not width * height: the
   // pitch accounts for both the row padding and the data size (uint8 vs
-  // uint16), and NVDEC rounds the Y plane's row count up to even. A 4:4:4
+  // uint16), and plane_rows() accounts for the vertical padding. A 4:4:4
   // surface has two full-size chroma planes instead of one half-height one, so
   // it's num_pixels * 3.
-  int64_t num_luma_plane_rows =
-      static_cast<int64_t>(round_up_to_even(surface_height()));
+  int64_t num_luma_plane_rows = static_cast<int64_t>(plane_rows());
   int64_t pitch = static_cast<int64_t>(av_frame->linesize[0]);
   bool is_444 = is_444_surface_format(surface_format_);
   int64_t num_bytes = is_444 ? pitch * num_luma_plane_rows * 3

@@ -335,7 +335,7 @@ function(make_torchcodec_libraries
 
     set(_torchcodec_rocm_deps_ok FALSE)
     if(ENABLE_ROCM)
-        # ROCm builds require HIP, RPP, and the rocDecode CMake package from the same
+        # ROCm builds require HIP and the rocDecode CMake package from the same
         # ROCm install (https://github.com/ROCm/TheRock)
         if(DEFINED ENV{ROCM_PATH})
             list(APPEND CMAKE_PREFIX_PATH "$ENV{ROCM_PATH}")
@@ -348,24 +348,20 @@ function(make_torchcodec_libraries
             )
         endif()
         find_package(hip QUIET)
-        find_package(rpp 3.1.2 QUIET)
         find_package(rocdecode 1.8.0 CONFIG QUIET)
-        if(hip_FOUND AND rpp_FOUND AND rocdecode_FOUND)
+        if(hip_FOUND AND rocdecode_FOUND)
             set(_torchcodec_rocm_deps_ok TRUE)
         else()
             set(_missing_rocm_deps "")
             if(NOT hip_FOUND)
                 list(APPEND _missing_rocm_deps "HIP")
             endif()
-            if(NOT rpp_FOUND)
-                list(APPEND _missing_rocm_deps "RPP (>= 3.1.2)")
-            endif()
             if(NOT rocdecode_FOUND)
                 list(APPEND _missing_rocm_deps "rocDecode (>= 1.8.0, CONFIG)")
             endif()
             message(
                 WARNING
-                "ENABLE_ROCM requires HIP, RPP, and rocDecode. Missing: ${_missing_rocm_deps}. "
+                "ENABLE_ROCM requires HIP and rocDecode. Missing: ${_missing_rocm_deps}. "
                 "Skipping ROCm support. Set ROCM_PATH if CMake cannot find your ROCm install."
             )
             set(ENABLE_ROCM OFF)
@@ -426,7 +422,6 @@ function(make_torchcodec_libraries
         # runtime] in NVCUVIDRuntimeLoader.cpp. Only the headers are needed here.
         target_link_libraries(${core_library_name} PRIVATE
             hip::host
-            rpp::rpp
         )
         # SYSTEM, because rocparser.h uses an anonymous type inside an anonymous
         # union, which our -Wall -Wextra -pedantic -Werror build otherwise

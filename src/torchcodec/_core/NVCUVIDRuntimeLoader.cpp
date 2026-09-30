@@ -457,20 +457,6 @@ bool load_nvcuvid_library() {
   return is_loaded();
 }
 
-// Load rocDecode on demand, for callers that have not gone through
-// load_nvcuvid_library() themselves.
-//
-// The shared NVDEC code does call it, and acts on the answer: that is what
-// turns a missing rocDecode into a CPU fallback instead of an error. The
-// older RocmDeviceInterface predates this file and calls rocDecode directly,
-// with no loader step to hook into, so the forwarders below load on first use
-// rather than aborting. This costs nothing: load_nvcuvid_library() takes the
-// mutex and returns early once the entry points are bound, so only the first
-// call through here does any work.
-bool ensure_rocdecode_loaded() {
-  return load_nvcuvid_library();
-}
-
 } // namespace facebook::torchcodec
 
 extern "C" {
@@ -479,9 +465,8 @@ rocDecStatus ROCDECAPI rocDecCreateVideoParser(
     RocdecVideoParser* parser_handle,
     RocdecParserParams* params) {
   STD_TORCH_CHECK(
-      facebook::torchcodec::ensure_rocdecode_loaded() &&
-          facebook::torchcodec::dl_rocDecCreateVideoParser,
-      "rocDecCreateVideoParser called but rocDecode could not be loaded!");
+      facebook::torchcodec::dl_rocDecCreateVideoParser,
+      "rocDecCreateVideoParser called but rocDecode not loaded!");
   return facebook::torchcodec::dl_rocDecCreateVideoParser(
       parser_handle, params);
 }
@@ -490,26 +475,23 @@ rocDecStatus ROCDECAPI rocDecParseVideoData(
     RocdecVideoParser parser_handle,
     RocdecSourceDataPacket* packet) {
   STD_TORCH_CHECK(
-      facebook::torchcodec::ensure_rocdecode_loaded() &&
-          facebook::torchcodec::dl_rocDecParseVideoData,
-      "rocDecParseVideoData called but rocDecode could not be loaded!");
+      facebook::torchcodec::dl_rocDecParseVideoData,
+      "rocDecParseVideoData called but rocDecode not loaded!");
   return facebook::torchcodec::dl_rocDecParseVideoData(parser_handle, packet);
 }
 
 rocDecStatus ROCDECAPI
 rocDecDestroyVideoParser(RocdecVideoParser parser_handle) {
   STD_TORCH_CHECK(
-      facebook::torchcodec::ensure_rocdecode_loaded() &&
-          facebook::torchcodec::dl_rocDecDestroyVideoParser,
-      "rocDecDestroyVideoParser called but rocDecode could not be loaded!");
+      facebook::torchcodec::dl_rocDecDestroyVideoParser,
+      "rocDecDestroyVideoParser called but rocDecode not loaded!");
   return facebook::torchcodec::dl_rocDecDestroyVideoParser(parser_handle);
 }
 
 rocDecStatus ROCDECAPI rocDecGetDecoderCaps(RocdecDecodeCaps* decode_caps) {
   STD_TORCH_CHECK(
-      facebook::torchcodec::ensure_rocdecode_loaded() &&
-          facebook::torchcodec::dl_rocDecGetDecoderCaps,
-      "rocDecGetDecoderCaps called but rocDecode could not be loaded!");
+      facebook::torchcodec::dl_rocDecGetDecoderCaps,
+      "rocDecGetDecoderCaps called but rocDecode not loaded!");
   return facebook::torchcodec::dl_rocDecGetDecoderCaps(decode_caps);
 }
 
@@ -517,9 +499,8 @@ rocDecStatus ROCDECAPI rocDecCreateDecoder(
     rocDecDecoderHandle* decoder_handle,
     RocDecoderCreateInfo* decoder_create_info) {
   STD_TORCH_CHECK(
-      facebook::torchcodec::ensure_rocdecode_loaded() &&
-          facebook::torchcodec::dl_rocDecCreateDecoder,
-      "rocDecCreateDecoder called but rocDecode could not be loaded!");
+      facebook::torchcodec::dl_rocDecCreateDecoder,
+      "rocDecCreateDecoder called but rocDecode not loaded!");
   return facebook::torchcodec::dl_rocDecCreateDecoder(
       decoder_handle, decoder_create_info);
 }
@@ -527,9 +508,8 @@ rocDecStatus ROCDECAPI rocDecCreateDecoder(
 rocDecStatus ROCDECAPI
 rocDecDestroyDecoder(rocDecDecoderHandle decoder_handle) {
   STD_TORCH_CHECK(
-      facebook::torchcodec::ensure_rocdecode_loaded() &&
-          facebook::torchcodec::dl_rocDecDestroyDecoder,
-      "rocDecDestroyDecoder called but rocDecode could not be loaded!");
+      facebook::torchcodec::dl_rocDecDestroyDecoder,
+      "rocDecDestroyDecoder called but rocDecode not loaded!");
   return facebook::torchcodec::dl_rocDecDestroyDecoder(decoder_handle);
 }
 
@@ -537,9 +517,8 @@ rocDecStatus ROCDECAPI rocDecDecodeFrame(
     rocDecDecoderHandle decoder_handle,
     RocdecPicParams* pic_params) {
   STD_TORCH_CHECK(
-      facebook::torchcodec::ensure_rocdecode_loaded() &&
-          facebook::torchcodec::dl_rocDecDecodeFrame,
-      "rocDecDecodeFrame called but rocDecode could not be loaded!");
+      facebook::torchcodec::dl_rocDecDecodeFrame,
+      "rocDecDecodeFrame called but rocDecode not loaded!");
   return facebook::torchcodec::dl_rocDecDecodeFrame(decoder_handle, pic_params);
 }
 
@@ -550,9 +529,8 @@ rocDecStatus ROCDECAPI rocDecGetVideoFrame(
     uint32_t* horizontal_pitch,
     RocdecProcParams* vid_postproc_params) {
   STD_TORCH_CHECK(
-      facebook::torchcodec::ensure_rocdecode_loaded() &&
-          facebook::torchcodec::dl_rocDecGetVideoFrame,
-      "rocDecGetVideoFrame called but rocDecode could not be loaded!");
+      facebook::torchcodec::dl_rocDecGetVideoFrame,
+      "rocDecGetVideoFrame called but rocDecode not loaded!");
   return facebook::torchcodec::dl_rocDecGetVideoFrame(
       decoder_handle,
       pic_idx,

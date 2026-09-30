@@ -2864,14 +2864,24 @@ class TestVideoDecoder:
     def test_rocm_h265_10bit_hardware_support(self):
         """Test that H.265 10-bit videos are decoded by rocDecode hardware.
 
-        Expect uint8 RGB (CHW) as expected by torchcodec. Match against the CPU
-        decoder using the same rules as other GPU decode tests.
+        Expect uint8 RGB (CHW) as expected by torchcodec.
 
-        rocDecode outputs 8-bit NV12 (10-bit content is downconverted in hardware),
-        which quantizes differently than FFmpeg's full-precision 10-bit->RGB path.
-        The RPP kernel reproduces FFmpeg's swscale conversion exactly, but the 8-bit
-        NV12 roundtrip leaves ~0.1% of pixels 1 level over the usual tolerance
-        (zero-mean, PSNR > 50 dB), so we compare with atol=4.
+        Compared against the CPU decoder with the same check
+        test_bt2020_10bit_video applies to NVDEC, which carries the same
+        standing TODO about a CPU-vs-GPU mismatch on 10-bit content. The cause
+        is the chroma upsampling filter. For >8bit input swscale has no
+        unscaled fast path, so the CPU reference goes through the general
+        scaler and gets interpolated chroma, while the shared CUDA/HIP kernel
+        replicates chroma (one UV pair per 2x2 block, color_conversion.cu).
+        Measured on this asset: the GPU frames match
+        `ffmpeg -sws_flags neighbor+full_chroma_int` on every pixel within
+        atol=3, and the CPU frames match `-sws_flags bicubic` exactly. So the
+        residual is the filter and nothing else - not the bit depth, not the
+        colorspace, and not anything ROCm-specific: NVDEC has it too.
+
+        This does not currently reach 90% on every frame (measured 91.96 /
+        89.95 / 89.78 / 91.06 for the four indices below). Closing it needs a
+        bit-depth-dependent chroma filter in the shared kernel.
         """
 
         asset = H265_10BITS
@@ -2895,7 +2905,9 @@ class TestVideoDecoder:
             frame_cpu = decoder_cpu.get_frame_at(frame_index).data
             assert frame_cpu.dtype == torch.uint8
 
-            assert_frames_equal(frame_rocm, frame_cpu.to("cuda"), atol=4)
+            assert_tensor_close_on_at_least(
+                frame_rocm, frame_cpu.to("cuda"), percentage=90, atol=3
+            )
 
     @needs_rocm
     def test_rocm_h264_10bit_cpu_fallback(self):

@@ -195,19 +195,19 @@ pip install torchcodec --index-url=https://download.pytorch.org/whl/cpu
 
 TorchCodec supports hardware-accelerated video decoding on AMD GPUs with ROCm
 using [rocDecode](https://rocm.docs.amd.com/projects/rocDecode/en/latest) (via
-VCN - Video Core Next) and post-processing with
-[RPP](https://rocm.docs.amd.com/projects/rpp/en/latest) (ROCm Performance
-Primitives).
+VCN - Video Core Next). Color conversion afterwards runs in TorchCodec's own
+HIP kernels, the same ones the CUDA build uses, so a ROCm decode matches a CUDA
+one exactly.
 
 **Requirements:**
-- ROCm 10.1 or above (includes rocDecode and RPP packages)
+- ROCm 10.1 or above (includes the rocDecode package)
 - AMD GPU with VCN (Video Core Next) support
 - PyTorch compiled with ROCm support
 
 **Installation:**
 
 1. Install ROCm 10.1 or later following AMD's [ROCm installation
-   guide](https://rocm.docs.amd.com/). ROCm 10.1+ includes rocDecode and RPP by
+   guide](https://rocm.docs.amd.com/). ROCm 10.1+ includes rocDecode by
    default.
 
 2. Install PyTorch with ROCm support:

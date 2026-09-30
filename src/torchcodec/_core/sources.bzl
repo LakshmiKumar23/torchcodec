@@ -87,14 +87,12 @@ decoder_core_cuda_sources = [
 # CPU decoding instead of crashing.
 decoder_core_rocm_sources = [
     "BetaCudaDeviceInterface.cpp",
+    "BetaRocmDeviceInterface.cpp",
     "NVCUVIDRuntimeLoader.cpp",
     "NVDECCache.cpp",
     "CUDACommon.cpp",
     "color_conversion.cpp",
     "color_conversion.cu",
-    "RocmDeviceInterface.cpp",
-    "RocDecCache.cpp",
-    "RocmCommon.cpp",
 ]
 
 file_like_context_sources = [
