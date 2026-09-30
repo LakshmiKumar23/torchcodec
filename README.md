@@ -243,8 +243,10 @@ decoder = VideoDecoder("video.mp4", device="cuda")
 print(decoder.cpu_fallback)  # Check if rocDecode is being used
 ```
 
-For more details and examples, see the [basic ROCm
-example](https://meta-pytorch.org/torchcodec/stable/generated_examples/basic_rocm_example.html).
+For more details and examples, see the [GPU decoding
+example](https://meta-pytorch.org/torchcodec/stable/generated_examples/basic_cuda_example.html)
+— it applies to AMD GPUs as written, since `device="cuda"` is the AMD GPU under
+a ROCm build of PyTorch.
 
 ### XPU support
 

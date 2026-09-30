@@ -84,15 +84,55 @@ void validate_device_interface(
             arg.first.variant == variant;
       });
 
+  if (device_interface != device_map.end()) {
+    return;
+  }
+
+  // Name the way forward, not just the way that failed: which variants this
+  // build does have for this device type. An unregistered variant is a build
+  // configuration fact, so the answer is already sitting in the map.
+  std::string available;
+  for (const auto& entry : device_map) {
+    if (entry.first.device_type != device_type_enum) {
+      continue;
+    }
+    if (!available.empty()) {
+      available += ", ";
+    }
+    available += "'";
+    available += entry.first.variant;
+    available += "'";
+  }
+  if (available.empty()) {
+    available = "none";
+  }
+
+  // The one case where the variant is missing by design rather than by build
+  // options, so a bare list of alternatives would leave the user guessing.
+  // "cuda" is the AMD GPU in a ROCm build, so asking for the NVIDIA-only
+  // FFmpeg-based interface on one is a category error worth spelling out.
+  std::string hint;
+#if defined(USE_ROCM)
+  if (device_type_enum == kStableCUDA && variant == "ffmpeg") {
+    hint =
+        " The 'ffmpeg' variant is NVIDIA-only and is not a supported backend "
+        "on ROCm. Hardware decoding on AMD GPUs goes through rocDecode, which "
+        "is the 'default' variant.";
+  }
+#endif
+
   STD_TORCH_CHECK(
-      device_interface != device_map.end(),
+      false,
       "Unsupported device: ",
       device,
       " (device type: ",
       device_type,
       ", variant: ",
       variant,
-      ")");
+      "). Variants registered for this device type: ",
+      available,
+      ".",
+      hint);
 }
 
 std::unique_ptr<DeviceInterface> create_device_interface(
