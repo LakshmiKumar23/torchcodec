@@ -71,8 +71,8 @@ def is_rocm() -> bool:
 
 
 # Decorator for tests that need an NVIDIA GPU specifically, as opposed to any
-# GPU that torch spells "cuda". Use it for things that have no AMD counterpart
-# at all - the FFmpeg CUDA decoding backend and the nvJPEG image decoder - as
+# GPU that torch spells "cuda". Use it only for things that have no AMD
+# counterpart at all, which today means the FFmpeg CUDA decoding backend. It is
 # distinct from needs_cuda, which passes on ROCm. Handled in
 # pytest_collection_modifyitems() of conftest.py.
 def needs_nvidia(test_item):

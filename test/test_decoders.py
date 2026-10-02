@@ -6478,7 +6478,6 @@ def _jpeg_cuda_param(*values):
         marks=(
             pytest.mark.needs_jpeg,
             pytest.mark.needs_cuda,
-            pytest.mark.needs_nvidia,
         ),
         id="jpeg_cuda",
     )
@@ -7123,7 +7122,6 @@ class TestImageDecoder:
 
     # ===== JPEG on CUDA (nvJPEG) =====
 
-    @needs_nvidia
     @needs_cuda
     @needs_jpeg
     @pytest.mark.parametrize("orientation", (0, 1, 2, 3, 4, 5, 6, 7, 8))
@@ -7140,7 +7138,6 @@ class TestImageDecoder:
         assert gpu.shape == cpu.shape
         assert_tensor_close_on_at_least(gpu.cpu(), cpu, percentage=99, atol=3)
 
-    @needs_nvidia
     @needs_cuda
     @needs_jpeg
     @pytest.mark.parametrize("asset", (GRADIENT_JPEG, GRAYSCALE_JPEG))
@@ -7157,7 +7154,6 @@ class TestImageDecoder:
         assert gpu.shape == cpu.shape
         assert_tensor_close_on_at_least(gpu.cpu(), cpu, percentage=99, atol=3)
 
-    @needs_nvidia
     @needs_cuda
     @needs_jpeg
     @pytest.mark.parametrize("mode", ("UNCHANGED", "GRAY", "RGB"))
@@ -7179,7 +7175,6 @@ class TestImageDecoder:
             assert batch[1].shape[0] == 1
             assert batch[2].shape[0] == 3
 
-    @needs_nvidia
     @needs_cuda
     @needs_jpeg
     def test_cuda_jpeg_single_vs_list_return_type(self):
@@ -7189,7 +7184,6 @@ class TestImageDecoder:
         assert isinstance(as_list, list) and len(as_list) == 1
         torch.testing.assert_close(as_list[0], single, atol=0, rtol=0)
 
-    @needs_nvidia
     @needs_cuda
     @needs_jpeg
     def test_cuda_jpeg_errors(self):
@@ -7203,7 +7197,6 @@ class TestImageDecoder:
         with pytest.raises(RuntimeError, match="must be on the CPU"):
             decode_jpeg(cuda_data, device="cuda")
 
-    @needs_nvidia
     @needs_cuda
     @needs_jpeg
     def test_cuda_jpeg_multithreaded(self):
@@ -7227,7 +7220,6 @@ class TestImageDecoder:
                 assert got.shape == ref.shape
                 assert_tensor_close_on_at_least(got.cpu(), ref, percentage=99, atol=3)
 
-    @needs_nvidia
     @needs_cuda
     @needs_jpeg
     def test_cuda_jpeg_waits_for_callers_stream(self):
