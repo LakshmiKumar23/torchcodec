@@ -62,6 +62,23 @@ def needs_rocm(test_item):
     return pytest.mark.needs_rocm(test_item)
 
 
+def is_rocm() -> bool:
+    # Whether torch was built against ROCm rather than CUDA. Note that
+    # torch.cuda.is_available() is True in a ROCm build: torch.device("cuda")
+    # *is* the AMD GPU there. So "do we have a GPU" and "is that GPU an NVIDIA
+    # one" are two different questions, and needs_cuda only answers the first.
+    return getattr(torch.version, "hip", None) is not None
+
+
+# Decorator for tests that need an NVIDIA GPU specifically, as opposed to any
+# GPU that torch spells "cuda". Use it for things that have no AMD counterpart
+# at all - the FFmpeg CUDA decoding backend and the nvJPEG image decoder - as
+# distinct from needs_cuda, which passes on ROCm. Handled in
+# pytest_collection_modifyitems() of conftest.py.
+def needs_nvidia(test_item):
+    return pytest.mark.needs_nvidia(test_item)
+
+
 # Decorator for skipping ffmpeg tests when ffmpeg cli isn't available. The tests are
 # effectively marked to be skipped in pytest_collection_modifyitems() of
 # conftest.py
@@ -115,14 +132,20 @@ def all_supported_devices():
     return (
         "cpu",
         pytest.param("cuda", marks=pytest.mark.needs_cuda),
-        pytest.param(_CUDA_FFMPEG_DEVICE_STR, marks=pytest.mark.needs_cuda),
+        pytest.param(
+            _CUDA_FFMPEG_DEVICE_STR,
+            marks=[pytest.mark.needs_cuda, pytest.mark.needs_nvidia],
+        ),
     )
 
 
 def cuda_devices():
     return (
         pytest.param("cuda", marks=pytest.mark.needs_cuda),
-        pytest.param(_CUDA_FFMPEG_DEVICE_STR, marks=pytest.mark.needs_cuda),
+        pytest.param(
+            _CUDA_FFMPEG_DEVICE_STR,
+            marks=[pytest.mark.needs_cuda, pytest.mark.needs_nvidia],
+        ),
     )
 
 

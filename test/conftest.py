@@ -8,6 +8,7 @@ from .utils import (
     avif_is_available,
     heic_is_available,
     in_fbcode,
+    is_rocm,
     jpeg_is_available,
     png_is_available,
     webp_is_available,
@@ -21,6 +22,10 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers", "needs_rocm: mark for tests that rely on a ROCm device"
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_nvidia: mark for tests that rely on an NVIDIA GPU specifically",
     )
     config.addinivalue_line(
         "markers", "needs_ffmpeg_cli: mark for tests that rely on ffmpeg"
@@ -86,6 +91,7 @@ def pytest_collection_modifyitems(items):
         # mark.
         needs_cuda = item.get_closest_marker("needs_cuda") is not None
         needs_rocm = item.get_closest_marker("needs_rocm") is not None
+        needs_nvidia = item.get_closest_marker("needs_nvidia") is not None
         needs_ffmpeg_cli = item.get_closest_marker("needs_ffmpeg_cli") is not None
         needs_jpeg = item.get_closest_marker("needs_jpeg") is not None
         needs_png = item.get_closest_marker("needs_png") is not None
@@ -126,11 +132,20 @@ def pytest_collection_modifyitems(items):
             # those for whatever reason, we need to know.
             item.add_marker(pytest.mark.skip(reason="CUDA not available."))
 
-        # Check if ROCm is available by checking torch.version.hip
-        is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
+        # needs_nvidia is a strict refinement of needs_cuda: the test needs a
+        # GPU *and* that GPU must be an NVIDIA one. Tests carry both marks, so
+        # the needs_cuda branch above already covers "no GPU at all" and this
+        # one only has to rule out an AMD GPU. Note there is deliberately no
+        # FAIL_WITHOUT_* escape hatch: a ROCm box will never grow an NVIDIA
+        # GPU, so forcing these to run could only ever produce noise.
+        if needs_nvidia and is_rocm():
+            item.add_marker(
+                pytest.mark.skip(reason="Needs an NVIDIA GPU, this is a ROCm build.")
+            )
+
         if (
             needs_rocm
-            and not (torch.cuda.is_available() and is_rocm)
+            and not (torch.cuda.is_available() and is_rocm())
             and os.environ.get("FAIL_WITHOUT_ROCM") is None
         ):
             # We skip ROCm tests on non-ROCm machines, but only if the
