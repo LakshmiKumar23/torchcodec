@@ -204,4 +204,34 @@ int BetaRocmDeviceInterface::plane_rows() const {
                                 : BetaCudaDeviceInterface::plane_rows();
 }
 
+/* clang-format off */
+// Note: [Why the ROCm surface read has to be synchronous]
+//
+// The base class records surface_read_done_ here and has receive_frame() order
+// the next mapping after it. That is enough on NVDEC, where a surface stays
+// mapped until cuvidUnmapVideoFrame() and the decoder will not write to a
+// mapped surface.
+//
+// rocDecode has no unmap entry point: it recycles its internal VAAPI surface
+// pool on its own schedule, and rocDecDecodeFrame() submissions are not ordered
+// against any torch stream. So the base class's event gate is vacuous here -
+// nothing stops rocDecode overwriting the surface while our copy out of it is
+// still queued.
+//
+// It only bites when the consumer runs on a stream other than the decoder's:
+// same-stream use orders the copy before the reuse by construction. The "Blocks"
+// APIs let a caller read frame.planes on its own stream, which is exactly that
+// case, and it shows up as torn frames - partially-overwritten surfaces, not
+// swapped buffers.
+//
+// So we wait on the host: once this returns, the copy has landed and rocDecode
+// is free to reclaim the surface. That costs one host sync per frame, which is
+// the price of a decoder that will not tell us when it reuses its surfaces.
+/* clang-format on */
+
+void BetaRocmDeviceInterface::record_surface_read(cudaStream_t stream) {
+  BetaCudaDeviceInterface::record_surface_read(stream);
+  surface_read_done_.synchronize();
+}
+
 } // namespace facebook::torchcodec

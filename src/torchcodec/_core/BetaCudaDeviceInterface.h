@@ -152,7 +152,12 @@ class BetaCudaDeviceInterface : public DeviceInterface {
   // consumer is reading. These track that read so the next mapping, in
   // receive_frame(), can be ordered after it.
   CudaEvent surface_read_done_;
-  void record_surface_read(cudaStream_t stream);
+  // Virtual because recording the event is only enough when the decoder honors
+  // the mapping: NVDEC won't reuse a mapped surface, so ordering the next
+  // mapping after this event is sufficient. rocDecode reclaims surfaces on its
+  // own schedule and has no unmap entry point, so the ROCm override has to turn
+  // this into a host-side wait. See the override for why.
+  virtual void record_surface_read(cudaStream_t stream);
 
   UniqueAVFrame convert_cuda_frame_to_av_frame(
       CUdeviceptr frame_ptr,

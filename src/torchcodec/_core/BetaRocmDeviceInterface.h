@@ -50,6 +50,8 @@ class BetaRocmDeviceInterface : public BetaCudaDeviceInterface {
 
   int plane_rows() const override;
 
+  void record_surface_read(cudaStream_t stream) override;
+
  private:
   // How far apart rocDecode placed the planes of the last surface we mapped,
   // in luma rows. Learned from the driver in map_frame() rather than computed,
