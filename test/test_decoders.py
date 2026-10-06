@@ -4940,8 +4940,17 @@ class TestBlocks:
     @pytest.mark.parametrize(
         "video, expected_pix_fmt",
         (
-            # Too small for NVDEC.
-            (H265_VIDEO, "nv12"),
+            # Too small for NVDEC, whose HEVC floor is above this clip's
+            # 128x128. rocDecode's floor is 64x64 (`videodecodecaps` on
+            # gfx1100), so it decodes this in hardware and never falls back -
+            # the premise is NVIDIA-specific, not behavior under test. The
+            # 4:4:4 params below cover the fallback path on both backends.
+            pytest.param(
+                H265_VIDEO,
+                "nv12",
+                marks=pytest.mark.needs_nvidia,
+                id="h265-too-small-for-nvdec",
+            ),
             # H264 4:4:4, which NVDEC can't decode. Uploading it as NV12 would
             # halve its chroma resolution, so it stays 4:4:4.
             (TESTSRC2_ODD_HEIGHT_AND_WIDTH_444, "yuv444p"),
