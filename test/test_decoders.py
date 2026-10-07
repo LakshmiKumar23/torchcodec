@@ -1944,6 +1944,7 @@ class TestVideoDecoder:
         )
 
     @needs_cuda
+    @needs_nvidia
     def test_10bit_gpu_fallsback_to_cpu(self):
         # Test for 10-bit videos that aren't supported by NVDEC: we decode and
         # do the color conversion on the CPU.
@@ -2364,6 +2365,7 @@ class TestVideoDecoder:
             assert nvdec_frame.duration_seconds == ref_frame.duration_seconds
 
     @needs_cuda
+    @needs_nvidia
     @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
     def test_cuda_mpeg4_mp4_first_frame(self, seek_mode):
         # non-regression test for
@@ -2513,6 +2515,7 @@ class TestVideoDecoder:
             VideoDecoder(NASA_VIDEO.path, device="cuda:0:bad_variant")
 
     @needs_cuda
+    @needs_nvidia
     def test_set_cuda_backend(self):
         # Tests for the set_cuda_backend() context manager.
 
@@ -3003,11 +3006,18 @@ class TestVideoDecoder:
         assert frames.data.shape == (2, 3, 100, 100)
 
     @needs_cuda
+    @needs_nvidia
     @pytest.mark.parametrize("device", cuda_devices())
     def test_cpu_fallback_h265_video(self, device):
         """Test that H265 video triggers CPU fallback on CUDA interfaces."""
         # H265_VIDEO is known to trigger CPU fallback on CUDA
-        # because its dimensions are too small
+        # because its dimensions are too small.
+        #
+        # The premise is NVDEC's size floor, which is above this clip's
+        # 128x128. rocDecode's floor is 64x64, so it decodes the clip in
+        # hardware and reports no fallback; test_rocm_interface_cpu_fallback
+        # covers the same asset on ROCm. Same reasoning as the
+        # h265-too-small-for-nvdec param of test_cpu_fallback_is_on_cuda.
         decoder, _ = make_video_decoder(H265_VIDEO.path, device=device)
 
         if "ffmpeg" in device:
