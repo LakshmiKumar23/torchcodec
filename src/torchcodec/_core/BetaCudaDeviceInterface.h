@@ -24,6 +24,7 @@
 #include "Transform.h"
 #include "color_conversion.h"
 
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -35,9 +36,6 @@
 namespace facebook::torchcodec {
 // The buffer a frame owns its samples in, hung off the AVFrame as opaque data.
 struct OwnedFrameStorage {
-  // Marks the point where the copy (or upload) that filled `storage` was
-  // enqueued. A consumer on another stream must wait on it.
-  CudaEvent frame_ready;
   torch::stable::Tensor storage;
 };
 
@@ -220,7 +218,13 @@ class BetaCudaDeviceInterface : public DeviceInterface {
   CUVIDEOFORMAT video_format_ = {};
   CUVIDEOFORMATEX parser_ext_info_ = {};
 
-  std::queue<CUVIDPARSERDISPINFO> ready_frames_;
+  std::deque<CUVIDPARSERDISPINFO> ready_frames_;
+
+  // Whether we track the pts ourselves, instead of relying on the NVCUVID
+  // parser.
+  bool track_pts_ourselves_ = false;
+  std::queue<int64_t>
+      pending_pts_; // only used when track_pts_ourselves_ is true
 
   // The packets flagged AV_PKT_FLAG_DISCARD must be decoded, but their frames
   // must not be returned (that's how libavcodec does it). We track the

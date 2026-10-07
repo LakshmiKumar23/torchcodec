@@ -9,13 +9,13 @@
 Multi-threaded decoding pipelines
 =================================
 
-.. currentmodule:: torchcodec.decoders._blocks
+.. currentmodule:: torchcodec.decoders
 
-.. warning::
+.. important::
 
-   **The Blocks APIs are under active construction.** They are private
-   and unreleased. Signatures and semantics may change without notice. This
-   tutorial only exists to show what they will eventually make possible.
+   **The low-level APIs are in beta.** Their signatures and semantics may still
+   change slightly, in response to user feedback. Please `share your feedback
+   <https://github.com/meta-pytorch/torchcodec/issues?q=is:open+is:issue>`__!
 
 In this tutorial, we'll assemble the three decoding stages into pipelines of our
 own: running demuxing, decoding and color-conversion concurrently on several
@@ -24,9 +24,17 @@ the GIL.
 
 .. important::
 
-   The Blocks objects can cross threads, but not processes, so multi-processing
+   These objects can cross threads, but not processes, so multi-processing
    is currently not supported. But it *can* be: if that's something you need,
    please open an issue.
+
+.. note::
+
+   The pipelines below run every stage on the same CUDA stream, and nothing here
+   requires you to think about stream synchronization. If you decide however to
+   give each stage a CUDA stream of its own, read
+   :ref:`sphx_glr_generated_examples_low_level_cuda_streams.py` for common gotchas
+   and how to avoid them.
 """
 
 # %%
@@ -37,6 +45,8 @@ from pathlib import Path
 
 import torch
 
+# sphinx_gallery_thumbnail_path = '_static/thumbnails/grumps_low_level_pipelines.jpg'
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"{device = }")
 
@@ -45,7 +55,7 @@ video_path = temp_dir / "video.mp4"
 subprocess.run(
     [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=5",
+        "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30:duration=10",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "30",
         "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
         str(video_path),
@@ -63,11 +73,11 @@ subprocess.run(
 # :class:`~torchcodec.Frame` objects a :class:`ColorConverter` makes of those. A
 # pipeline is then a chain of generators, and inserting ``prefetch()`` between
 # two of them puts everything upstream on its own thread: the stages run
-# concurrently, and since the blocks release the GIL, that's real parallelism.
+# concurrently, and since the stages release the GIL, that's real parallelism.
 import queue
 import threading
 
-from torchcodec.decoders._blocks import ColorConverter, Demuxer
+from torchcodec.decoders import ColorConverter, Demuxer
 
 
 def demux(demuxer):
@@ -149,22 +159,29 @@ def one_thread_each(device):
 
 PIPELINES = (sequential, convert_on_own_thread, demux_on_own_thread, one_thread_each)
 for pipeline in PIPELINES:
-    frames = list(pipeline(device))
-    print(f"{pipeline.__name__}: {len(frames)} frames on {frames[0].data.device}")
+    num_frames = 0
+    for frame in pipeline(device):
+        num_frames += 1
+    print(f"{pipeline.__name__}: {num_frames} frames on {frame.data.device}")
 
 # %%
 # Which split is best depends on where the work is:
 #
-# * On the **CPU**, color conversion typically costs about as much as decoding,
-#   so ``convert_on_own_thread`` is usually the best one (see benchmarks below)
+# * On the **CPU**, color conversion costs a sizeable fraction of what decoding
+#   costs, so ``convert_on_own_thread`` is usually the best one (see benchmarks
+#   below)
 # * On **CUDA**, color conversion is comparatively much cheaper and is dwarfed
 #   by the decoding time, so demuxing in parallel with ``demux_on_own_thread``
 #   may be the better split.
 #
 #
-# Let's compare the speedup that ``convert_on_own_thread`` on the CPU, vs the
-# sequential pipeline and the :meth:`VideoDecoder.get_all_frames() #
-# <torchcodec.decoders.VideoDecoder.get_all_frames>` method as baselines.
+# Let's compare the speedup that ``convert_on_own_thread`` gives on the CPU, vs
+# the sequential pipeline and a :class:`~torchcodec.decoders.VideoDecoder` as
+# baselines. We iterate over the ``VideoDecoder`` frame by frame instead of
+# calling :meth:`~torchcodec.decoders.VideoDecoder.get_all_frames`, so that all
+# three have the same memory profile: one frame at a time, rather than the
+# entire video. ``get_all_frames()`` can be faster than iterating, but it has to
+# hold all the frames at once.
 from time import perf_counter_ns
 
 from torchcodec.decoders import VideoDecoder
@@ -181,21 +198,27 @@ def bench(f, num_exp=3, warmup=1):
     return torch.tensor(times).float().median().item() / 1e9
 
 
+def consume(frames):
+    for _ in frames:
+        pass
+
+
 def decode_all_with_videodecoder():
     decoder = VideoDecoder(video_path, device="cpu", seek_mode="approximate")
-    return decoder.get_all_frames()
+    consume(decoder)
 
 
 baseline = bench(decode_all_with_videodecoder)
-print(f"{'VideoDecoder.get_all_frames()':<29}: {baseline:.2f}s")
+print(f"{'VideoDecoder':<29}: {baseline:.2f}s")
 
 for pipeline in (sequential, convert_on_own_thread):
-    seconds = bench(lambda p=pipeline: list(p("cpu")))
+    seconds = bench(lambda p=pipeline: consume(p("cpu")))
     print(f"{pipeline.__name__:<29}: {seconds:.2f}s "
           f"({baseline / seconds:.2f}x vs VideoDecoder)")
 
 # %%
-# ``sequential`` lands on the baseline, as expected: the same work, in the same
-# order, on one thread. ``convert_on_own_thread`` is where the speedup is,
-# because it can overalp the two most expensive steps: decoding and
-# color-conversion.
+# ``sequential`` should land close to the ``VideoDecoder`` baseline, as
+# expected: they do the same work on one thread.
+# ``convert_on_own_thread`` should be faster, because it can overlap the
+# two most expensive steps: decoding and color-conversion. Note: actual speedup
+# will depend on the capabilities of the machine building these docs!

@@ -9,19 +9,19 @@
 Raw frames and raw audio samples
 ================================
 
-.. currentmodule:: torchcodec.decoders._blocks
+.. currentmodule:: torchcodec.decoders
 
-.. warning::
+.. important::
 
-   **The Blocks APIs are under active construction.** They are private
-   and unreleased. Signatures and semantics may change without notice. This
-   tutorial only exists to show what they will eventually make possible.
+   **The low-level APIs are in beta.** Their signatures and semantics may still
+   change slightly, in response to user feedback. Please `share your feedback
+   <https://github.com/meta-pytorch/torchcodec/issues?q=is:open+is:issue>`__!
 
-In this tutorial, we'll skip the conversion stage of a blocks pipeline and read
-the decoder's own YUV planes and audio samples directly, at the source's own
-precision.
+In this tutorial, we'll skip the conversion stage of a decoding pipeline and
+read the decoder's own YUV planes and audio samples directly, at the source's
+own precision.
 
-The last stage of a blocks pipeline - a :class:`ColorConverter` for video, an
+The last stage of a decoding pipeline - a :class:`ColorConverter` for video, an
 :class:`AudioConverter` for audio - is optional. If you stop before it, you get
 what the decoder actually produced: YUV planes in the codec's own pixel format,
 and audio samples in the codec's own sample type, with no conversion, no
@@ -34,7 +34,7 @@ YUV space, write a kernel fused with the first layer of your model, decode a
 integer audio samples yourself.
 
 This tutorial assumes you are familiar with the three stages described in
-:ref:`sphx_glr_generated_examples_blocks_basics.py`.
+:ref:`sphx_glr_generated_examples_low_level_basics.py`.
 """
 
 # %%
@@ -44,6 +44,8 @@ import tempfile
 from pathlib import Path
 
 import torch
+
+# sphinx_gallery_thumbnail_path = '_static/thumbnails/grumps_low_level_raw_data.jpg'
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"{device = }")
@@ -76,7 +78,7 @@ def decode_raw(demuxer, packet_decoder):
 # :class:`RawFrame` can hand out the decoder's own planes as tensor views, with
 # no copy and no conversion. It also carries everything you need to interpret
 # them.
-from torchcodec.decoders._blocks import ColorConverter, Demuxer
+from torchcodec.decoders import ColorConverter, Demuxer
 
 demuxer = Demuxer(video_path)
 packet_decoder = demuxer.streams[0].make_decoder(device=device)
@@ -105,6 +107,8 @@ print(f"{Y.shape = }, {U.shape = }, {Y.dtype = }, {Y.stride() = }")
 # applies it for you.
 
 # %%
+# .. _raw_data_custom_conversion:
+#
 # Doing the conversion yourself
 # -----------------------------
 #
@@ -144,25 +148,18 @@ print(f"{ours.shape = }, mean abs diff vs ColorConverter: "
       f"{(ours.float() - reference.float()).abs().mean():.2f}")
 
 # %%
-# Reading the planes on CUDA
-# ^^^^^^^^^^^^^^^^^^^^^^^^^^
+# Reading or converting the planes on CUDA
+# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 #
-# .. important::
+# The planes are views into a PyTorch CUDA allocation that the decoder still
+# owns and may reuse for a later frame. As long as you read them on the stream
+# the decoder ran on, which is the case unless you explicitly request otherwise,
+# there is no problem and you don't need to think about stream synchronization.
 #
-#    The planes are a view into a buffer the decoder will hand back to the CUDA
-#    caching allocator and reuse for a later frame. The allocator only knows
-#    about the stream the decoder ran on, so if you read the samples on a
-#    *different* CUDA stream, you must tell it so with
-#    :meth:`RawFrame.record_stream`, right after queueing your reads::
-#
-#        with torch.cuda.stream(my_stream):
-#            rgb = yuv420_to_rgb(*raw_frame.planes)
-#            raw_frame.record_stream(my_stream)
-#
-#    Without it, the decoder's next frame can be given the same buffer and
-#    overwrite these samples while your reads are still pending - a race that
-#    shows up as occasional corrupted frames, not as an error.
-#    A :class:`ColorConverter` does this for you.
+# However, if you read them on a *different* stream than the decoder stream, you
+# have to wait for the decoder's asynchronous copy before reading, and keep the
+# allocator from recycling the buffer while your reads are still queued. See
+# :ref:`sphx_glr_generated_examples_low_level_cuda_streams.py` to learn more.
 
 # %%
 # Formats that can't be viewed

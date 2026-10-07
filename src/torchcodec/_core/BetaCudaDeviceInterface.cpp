@@ -4,6 +4,7 @@
 // This source code is licensed under the BSD-style license found in the
 // LICENSE file in the root directory of this source tree.
 
+#include <algorithm>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -183,6 +184,84 @@ static int CUDAAPI pfn_display_picture_callback(
     CUVIDPARSERDISPINFO* disp_info) {
   auto decoder = static_cast<BetaCudaDeviceInterface*>(p_user_data);
   return decoder->frame_ready_in_display_order(disp_info);
+}
+
+// Whether a single VP9 coded frame is displayed, from the first bits of its
+// uncompressed header. Bit layout matches
+// libavcodec/bsf/vp9_superframe_split.c:
+//   frame_marker        f(2)  (== 2)
+//   profile_low_bit     f(1)
+//   profile_high_bit    f(1)
+//   [profile == 3] reserved f(1)
+//   show_existing_frame f(1)  -> if set, this frame IS displayed
+//   frame_type          f(1)
+//   show_frame          f(1)
+bool vp9_frame_is_displayed(const uint8_t* data, int size) {
+  int bit = 0;
+  auto read_bit = [&]() -> int {
+    int byte_index = bit >> 3;
+    if (byte_index >= size) {
+      return 0;
+    }
+    int value = (data[byte_index] >> (7 - (bit & 7))) & 1;
+    bit++;
+    return value;
+  };
+
+  if (size < 1) {
+    return false;
+  }
+  read_bit();
+  read_bit(); // frame_marker
+  int profile = read_bit();
+  profile |= read_bit() << 1;
+  if (profile == 3) {
+    read_bit(); // reserved
+  }
+  if (read_bit()) {
+    return true; // show_existing_frame: re-displays an existing reference
+  }
+  read_bit(); // frame_type
+  return read_bit() != 0; // show_frame
+}
+
+// How many frames a VP9 packet will display: 0 (a lone hidden alt-ref), 1
+// (the common case), or more. Returns -1 if the packet looks malformed.
+// Fully claude-generated.
+int count_vp9_displayed_frames(const uint8_t* data, int size) {
+  if (data == nullptr || size <= 0) {
+    return -1;
+  }
+
+  uint8_t marker = data[size - 1];
+  if ((marker & 0xe0) == 0xc0) {
+    int length_size = 1 + ((marker >> 3) & 0x3);
+    int nb_frames = 1 + (marker & 0x7);
+    int index_size = 2 + nb_frames * length_size;
+
+    if (size >= index_size && data[size - index_size] == marker) {
+      const uint8_t* sizes = data + size - index_size + 1;
+      int displayed = 0;
+      int offset = 0;
+      for (int i = 0; i < nb_frames; ++i) {
+        int frame_size = 0;
+        for (int j = 0; j < length_size; ++j) {
+          frame_size |= *sizes++ << (j * 8);
+        }
+        if (frame_size <= 0 || offset + frame_size > size - index_size) {
+          return -1;
+        }
+        if (vp9_frame_is_displayed(data + offset, frame_size)) {
+          displayed++;
+        }
+        offset += frame_size;
+      }
+      return displayed;
+    }
+  }
+
+  // Not a superframe: a single coded frame, displayed or not.
+  return vp9_frame_is_displayed(data, size) ? 1 : 0;
 }
 
 static UniqueCUvideodecoder create_decoder(
@@ -398,8 +477,8 @@ class CudaContextGuard {
   // thread.
   // Note that none of this was an issue before when our only entry-point was
   // the SingleStreamDecoder: all the entry-points were called from the same
-  // thread. Now that we have split the APIs in different blocks (PacketDecoder,
-  // ColorConverter), each of these blocks can be on different threads - and
+  // thread. Now that we have split the APIs in different stages (PacketDecoder,
+  // ColorConverter), each of these stages can be on different threads - and
   // importantly, they can be created in the main thread (where the context is
   // bound by our call to initialize_cuda_context_with_pytorch()), but then used
   // in a different thread that doesn't have the context.
@@ -491,6 +570,18 @@ void BetaCudaDeviceInterface::initialize_video_decoding(
   STD_TORCH_CHECK(codec_par != nullptr, "CodecParameters cannot be null");
 
   initialize_bsf(codec_par, av_format_ctx);
+
+  // On VP9 when there are alt-ref frames, the NVCUVID parser reports incorrect
+  // timestamps. We don't know why. It's just incorrect. And because our decode
+  // loops heavily rely on pts info, this leads to incorrect behavior:
+  // requesting for frame i may return frame i + ~2.
+  // So for VP9, we keep track of the pts ourselves. We can do that because VP9
+  // doesn't have B-frames: the packets and their corresponding pts values
+  // arrive in the same order that the frames will be displayed. So we can just
+  // queue the pts valueof the packets that we receive, and pop() those to
+  // assign them to the frames that are displayed.
+  // test_nvdec_vp9_superframe_seek() is a non-regression test for all this.
+  track_pts_ourselves_ = (codec_par->codec_id == AV_CODEC_ID_VP9);
 
   // Create parser. Default values that aren't obvious are taken from DALI.
   CUVIDPARSERPARAMS parser_params = {};
@@ -691,16 +782,22 @@ int BetaCudaDeviceInterface::stream_property_change(
     // Same as DALI's fallback
     video_format_.min_num_decode_surfaces = 20;
   }
+  // We request 4 more surfaces than the minimum, like in pynvvideocodec
+  // (ffmpeg's cuviddec.c adds 3). This should help mitigate a bug where NVCUVID
+  // re-uses a decode surface that we haven't yet mapped. See
+  // test_nvdec_surface_reuse. 32 is the NVDEC maximum.
+  video_format_.min_num_decode_surfaces = static_cast<unsigned char>(
+      std::min(video_format_.min_num_decode_surfaces + 4, 32));
 
   if (!decoder_) {
     decoder_ = NVDECCache::get_cache(device_).get_decoder(
-        video_format, surface_format_);
+        &video_format_, surface_format_);
 
     if (!decoder_) {
       // TODONVDEC P2: consider re-configuring an existing decoder instead of
       // re-creating one. See docs, see DALI. Re-configuration doesn't seem to
       // be enabled in DALI by default.
-      decoder_ = create_decoder(video_format, surface_format_);
+      decoder_ = create_decoder(&video_format_, surface_format_);
     }
 
     STD_TORCH_CHECK(decoder_, "Failed to get or create decoder");
@@ -737,6 +834,20 @@ int BetaCudaDeviceInterface::send_packet(const AVPacket& packet) {
 
   if (packet_to_send.flags & AV_PKT_FLAG_DISCARD) {
     discarded_timestamps_.insert(get_timestamp(cuvid_packet));
+  }
+
+  if (track_pts_ourselves_) {
+    // Push one entry per displayable frame contained within this packet.
+    // Each displayed frame inherits the packet's pts, which is what
+    // FFmpeg does too.
+    int num_displayed =
+        count_vp9_displayed_frames(packet_to_send.data, packet_to_send.size);
+    if (num_displayed < 0) {
+      num_displayed = 1; // Malformed packet: assume the common case.
+    }
+    for (int i = 0; i < num_displayed; ++i) {
+      pending_pts_.push(packet_to_send.pts);
+    }
   }
 
   return send_cuvid_packet(cuvid_packet);
@@ -808,6 +919,19 @@ int BetaCudaDeviceInterface::frame_ready_for_decoding(
     CUVIDPICPARAMS* pic_params) {
   STD_TORCH_CHECK(pic_params != nullptr, "Invalid picture parameters");
   STD_TORCH_CHECK(decoder_, "Decoder not initialized before picture decode");
+  // See the comment about surfaces in stream_property_change().
+  for (const auto& queued_frame : ready_frames_) {
+    if (queued_frame.picture_index == pic_params->CurrPicIdx &&
+        discarded_timestamps_.count(queued_frame.timestamp) == 0) {
+      TC_LOG(
+          "NVDEC is decoding into surface %d, which still holds the frame with "
+          "pts %lld that hasn't been returned yet. That frame will be "
+          "returned with the wrong content.",
+          pic_params->CurrPicIdx,
+          static_cast<long long>(queued_frame.timestamp));
+    }
+  }
+
   // Send frame to be decoded by NVDEC. This may or may not block, depending on
   // the internal state of the NVDEC. Presumably, when it blocks, it gets
   // automatically unblocked once a frame has been decoded, although how and
@@ -825,7 +949,11 @@ int BetaCudaDeviceInterface::frame_ready_for_decoding(
 
 int BetaCudaDeviceInterface::frame_ready_in_display_order(
     CUVIDPARSERDISPINFO* disp_info) {
-  ready_frames_.push(*disp_info);
+  if (track_pts_ourselves_ && !pending_pts_.empty()) {
+    disp_info->timestamp = pending_pts_.front();
+    pending_pts_.pop();
+  }
+  ready_frames_.push_back(*disp_info);
   return 1; // success
 }
 
@@ -841,7 +969,7 @@ int BetaCudaDeviceInterface::receive_frame(UniqueAVFrame& av_frame) {
   while (!ready_frames_.empty() &&
          discarded_timestamps_.erase(get_timestamp(ready_frames_.front())) >
              0) {
-    ready_frames_.pop();
+    ready_frames_.pop_front();
   }
 
   if (ready_frames_.empty()) {
@@ -851,7 +979,7 @@ int BetaCudaDeviceInterface::receive_frame(UniqueAVFrame& av_frame) {
   }
 
   CUVIDPARSERDISPINFO disp_info = ready_frames_.front();
-  ready_frames_.pop();
+  ready_frames_.pop_front();
 
   // We set the NVDEC stream to the current stream, and remember it: consumers
   // of the mapped surface run later and possibly on a different stream, so they
@@ -877,7 +1005,7 @@ int BetaCudaDeviceInterface::receive_frame(UniqueAVFrame& av_frame) {
   // been enqueued:
   // - With SingleStreamDecoder, that frame was either color-converted (with a
   //   copy), or that's a frame that was discarded in SingleStreamDecoder.
-  // - With the "Blocks" APIs, the PacketDecoder forces a copy in
+  // - With the low-level APIs, the PacketDecoder forces a copy in
   //   make_frame_standalone().
   // Those reads are asynchronous, so we must wait on them to finish.
   surface_read_done_.make_stream_wait(nvdec_output_stream_);
@@ -1097,9 +1225,9 @@ void BetaCudaDeviceInterface::make_frame_standalone(UniqueAVFrame& av_frame) {
   //   receive_frame() without losing the data.
   // - CPU-fallback frames are uploaded here too, so that a PacketDecoder always
   //   hands out frames that live on its own device.
-  // Both are async, so we record an event in the attached data right after
-  // enqueueing them: a ColorConverter on another stream must wait on it before
-  // reading the frame.
+  // Both are enqueued on the caller's current stream (of
+  // PacketDecoder.decode()) and are async. It's up to the consumer to properly
+  // sync, see our `cuda_streams.py` tutorial.
   STD_TORCH_CHECK(
       mode() == Mode::DecoderOnly,
       "make_frame_standalone() is only valid in decoder-only mode: standalone "
@@ -1117,7 +1245,6 @@ void BetaCudaDeviceInterface::make_frame_standalone(UniqueAVFrame& av_frame) {
   }
 
   auto attached_data = new OwnedFrameStorage();
-  attached_data->frame_ready.record(current_stream);
   attached_data->storage = std::move(storage);
   av_frame->opaque_ref = av_buffer_create(
       reinterpret_cast<uint8_t*>(attached_data),
@@ -1139,48 +1266,6 @@ std::optional<torch::stable::Tensor> BetaCudaDeviceInterface::get_frame_storage(
       mode() == Mode::DecoderOnly && av_frame.opaque_ref != nullptr,
       "Unexpected call to get_frame_storage(), please report a bug ");
 
-  // Note [Standalone Frame Storage and the need for record_stream]
-  //
-  // A PacketDecoder and a ColorConverter may run on different CUDA streams.
-  // Consider the following:
-  //
-  // ```
-  // with decoder_stream:
-  //   frame = decoder.receive_frame()
-  // with color_converter_stream:
-  //   color_converter.convert(frame)
-  //
-  // del frame
-  //
-  // with decoder_stream:
-  //   frame = decoder.receive_frame()
-  // ```
-  //
-  // The call to convert(frame) is non-blocking and just enqueues the
-  // color-conversion kernel. The CPU moves on immediately to `del frame` while
-  // the kernel is still running (it may also not even have started depending on
-  // how color_converter_stream is congested).
-  //
-  // When the frame is deleted, the torch CUDA allocator reclaims its memory and
-  // it becomes available for reuse for any subsequent allocation on the
-  // decoder_stream. If the next decoder.receive_frame() happens before the
-  // color-conversion kernel has finished (specifically: the new storage
-  // allocation for that next frame in make_frame_standalone()), the memory is
-  // reused, overwritten, and the color-conversion kernel reads garbage (i.e.
-  // the next frame's samples!).
-  //
-  // We're hitting exactly what
-  // https://zdevito.github.io/2022/08/04/cuda-caching-allocator.html describes
-  // in the 'Streams and freeing memory' section, and the solution is to call
-  // record_stream() on the frame's storage within color_conversion_stream just
-  // after the kernel is enqueued: this tells the allocator that it must wait
-  // until this point (on the device side) before reclaiming the memory.
-  //
-  // We call record_stream(color_conversion_stream) on the frame storage in the
-  // ColorConverter, on behalf of the user. But we still must expose the storage
-  // for those users who would like to consume the frame with their own
-  // consumer, i.e. not using the ColorConverter: they need to call
-  // frame.record_stream(color_conversion_stream) themselves.
   return reinterpret_cast<OwnedFrameStorage*>(av_frame.opaque_ref->data)
       ->storage;
 }
@@ -1257,9 +1342,11 @@ void BetaCudaDeviceInterface::flush() {
   send_eof_packet();
   eof_sent_ = false;
 
-  std::queue<CUVIDPARSERDISPINFO> empty_queue;
-  std::swap(ready_frames_, empty_queue);
+  ready_frames_.clear();
   discarded_timestamps_.clear();
+
+  std::queue<int64_t> empty_pts;
+  std::swap(pending_pts_, empty_pts);
 
   send_seqhdr_packet();
 }
@@ -1504,9 +1591,6 @@ void BetaCudaDeviceInterface::convert_av_frame_to_frame_output(
         gpu_frame.opaque_ref != nullptr,
         "ColorConverter received a non-standalone frame; frames fed to a "
         "standalone ColorConverter must come from a PacketDecoder.");
-    auto attached_data =
-        reinterpret_cast<OwnedFrameStorage*>(gpu_frame.opaque_ref->data);
-    attached_data->frame_ready.make_stream_wait(current_stream);
   } else {
     STD_TORCH_CHECK(
         mode() == Mode::Both,
@@ -1517,6 +1601,9 @@ void BetaCudaDeviceInterface::convert_av_frame_to_frame_output(
       // mapping post-processing that receive_frame() enqueued on
       // nvdec_output_stream_. An uploaded frame, on the other hand, was
       // uploaded on current_stream and needs no ordering.
+      // TODO_API_BREAKDOWN CC P2: do we still need this?? We don't do any sync
+      // on behalf of the user anymore for the low-level APIs (see
+      // https://github.com/meta-pytorch/torchcodec/pull/1749) - so why here??
       nvdec_surface_ready_.make_stream_wait(current_stream);
     }
   }

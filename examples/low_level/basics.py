@@ -5,27 +5,29 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-========================================
-Blocks: build your own decoding pipeline
-========================================
+================================
+Build your own decoding pipeline
+================================
 
-.. currentmodule:: torchcodec.decoders._blocks
+.. currentmodule:: torchcodec.decoders
 
-.. warning::
+.. important::
 
-   **The Blocks APIs are under active construction.** They are private
-   and unreleased. Signatures and semantics may change without notice. This
-   tutorial only exists to show what they will eventually make possible.
+   **The low-level APIs are in beta.** Their signatures and semantics may still
+   change slightly, in response to user feedback. Please `share your feedback
+   <https://github.com/meta-pytorch/torchcodec/issues?q=is:open+is:issue>`__!
 
-In this tutorial, we'll take a tour of the Blocks APIs: the three decoding
-stages for video and audio, following several streams of a container at once,
-seeking, scanning, what the metadata means, and decoding a source that never
-ends.
+In this tutorial, we'll take a tour of the low-level decoding APIs: the three
+decoding stages for video and audio, following several streams of a container at
+once, seeking, scanning, what the metadata means, and decoding a source that
+never ends.
 
-:class:`~torchcodec.decoders.VideoDecoder` and
-:class:`~torchcodec.decoders.AudioDecoder` are each a single box that does
-demuxing, decoding and conversion for you. The Blocks APIs expose those three
-stages separately, one chain per media type:
+For simple end-to-end decoding, :class:`~torchcodec.decoders.VideoDecoder` and
+:class:`~torchcodec.decoders.AudioDecoder` are often all you need: they
+handle demuxing, decoding and conversion for you, in a single call. But that
+means you don't control these stages: you can't run them on different threads,
+stop before the conversion, or decode several streams in a single pass. The
+low-level APIs expose those three stages separately, one chain per media type:
 
 .. code-block::
 
@@ -35,22 +37,37 @@ stages separately, one chain per media type:
    Demuxer  ->  AudioPacketDecoder  ->  AudioConverter
     Packet        RawAudioSamples          AudioSamples
 
+This unlocks features that the high-level decoders don't offer:
 
-Two companion tutorials go further:
-
-* :ref:`sphx_glr_generated_examples_blocks_pipelines.py`, on running the stages
-  concurrently on several threads.
-* :ref:`sphx_glr_generated_examples_blocks_raw_data.py`, on reading the
-  decoder's own YUV planes and audio samples instead of converting them.
+* **Performance gains via multi-threaded pipelines**: demux, decode and color-convert on separate
+  threads. Each stage releases the GIL. (:ref:`tutorial
+  <sphx_glr_generated_examples_low_level_pipelines.py>`).
+* **Access raw YUV data, for SDR and HDR sources**: read the decoder's own planes, with no
+  conversion and no copy, at the source's own precision. 10-bit HDR comes out
+  as ``uint16`` with every bit intact. You also get access to the raw audio samples.
+  (:ref:`tutorial <sphx_glr_generated_examples_low_level_raw_data.py>`).
+* **Custom transformations of YUV data**: write your own color conversion kernel, or
+  train directly in YUV space! (:ref:`tutorial <raw_data_custom_conversion>`).
+* **Multi-stream decoding**: decode audio and video (or several streams)
+  in a single pass over the input (:ref:`below <low_level_several_streams>`).
+* **Endless streams**: decode sources that have no duration, no frame count
+  and no end, such as live streams and pipes
+  (:ref:`below <low_level_unknown_length>`).
+* **Key frame retrieval**: get exact key frame positions from a scan, and
+  decode key frames for cheap thumbnails or training samplers
+  (:ref:`below <low_level_keyframes>`).
 """
 
 # %%
 # First, a bit of boilerplate: a test video, and the device we'll run on.
+#
 import subprocess
 import tempfile
 from pathlib import Path
 
 import torch
+
+# sphinx_gallery_thumbnail_path = '_static/thumbnails/grumps_low_level_basics.jpg'
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"{device = }")
@@ -69,7 +86,7 @@ subprocess.run(
 )
 
 # %%
-# The three blocks
+# The three stages
 # ----------------
 #
 # One video stream
@@ -79,7 +96,7 @@ subprocess.run(
 # :meth:`VideoDecoder.get_all_frames()
 # <torchcodec.decoders.VideoDecoder.get_all_frames>`
 
-from torchcodec.decoders._blocks import ColorConverter, Demuxer
+from torchcodec.decoders import ColorConverter, Demuxer
 
 demuxer = Demuxer(video_path)
 (video_stream,) = demuxer.streams
@@ -106,7 +123,7 @@ print(f"{len(frames)} frames, {frames[0].data.shape = }, "
 # :class:`VideoStream`. From that stream we build a :class:`VideoPacketDecoder`,
 # which decodes the demuxer's :class:`Packet` objects into :class:`RawFrame`
 # objects. A :class:`RawFrame` typically contains raw YUV data that you can
-# access: see :ref:`sphx_glr_generated_examples_blocks_raw_data.py` for more
+# access: see :ref:`sphx_glr_generated_examples_low_level_raw_data.py` for more
 # details. Finally, a :class:`ColorConverter` turns
 # each of those into an RGB :class:`~torchcodec.Frame`, the same object a
 # :class:`~torchcodec.decoders.VideoDecoder` would have handed you.
@@ -131,7 +148,7 @@ print(f"{len(frames)} frames, {frames[0].data.shape = }, "
 # Audio decoding has the same three stages. The following pipeline is equivalent
 # to :meth:`AudioDecoder.get_all_samples()
 # <torchcodec.decoders.AudioDecoder.get_all_samples>`:
-from torchcodec.decoders._blocks import AudioConverter
+from torchcodec.decoders import AudioConverter
 
 audio_path = temp_dir / "audio.wav"
 subprocess.run(
@@ -176,6 +193,8 @@ print(f"{data.shape = }, {data.dtype = }, "
 # the end of the pipeline to retrieve the last samples.
 
 # %%
+# .. _low_level_several_streams:
+#
 # Several streams at once
 # ^^^^^^^^^^^^^^^^^^^^^^^
 #
@@ -275,7 +294,7 @@ print(f"asked for {seconds}s, landed on {landed_on.pts_seconds:.3f}s, "
 # %%
 # .. warning::
 #
-#    Important for audio: these blocks do no pre-roll. A lossy codec's first
+#    Important for audio: these APIs do no pre-roll. A lossy codec's first
 #    frames after a seek are subtly wrong until it re-primes, especially when
 #    resampling is involved. Decoding a margin before and after your target and
 #    discarding it is up to you. :class:`~torchcodec.decoders.AudioDecoder` does
@@ -306,11 +325,11 @@ print(f"{index.num_frames_from_content} frames at "
       f"to {index.end_stream_seconds_from_content}s")
 
 # %%
-# The index is also what gives the blocks frame *indices*, which they otherwise
+# The index is also what gives the stages frame *indices*, which they otherwise
 # don't have at all: :meth:`FrameIndex.index_at` maps a timestamp to the frame
 # on screen then, and :attr:`FrameIndex.pts_seconds` maps back. That's enough to
 # build :meth:`~torchcodec.decoders.VideoDecoder.get_frame_at`, or a clip
-# sampler, on top of the blocks.
+# sampler, on top of the low-level APIs.
 i = index.index_at(seconds)
 print(f"frame {i} is on screen at {seconds}s, and starts at {index.pts_seconds[i]}s")
 
@@ -320,6 +339,8 @@ print(f"frame {i} is on screen at {seconds}s, and starts at {index.pts_seconds[i
 # If you're following more than one video stream, you can call :meth:`scan` on
 # each of them. You only pay the scan cost once, for the first stream: the other
 # streams' scan resuts are cached and returned when you call scan on them.
+#
+# .. _low_level_keyframes:
 #
 # Keyframes
 # ^^^^^^^^^
@@ -382,7 +403,7 @@ print(f"frame {i} at {target.pts_seconds:.3f}s")
 # Metadata
 # --------
 #
-# Metadata comes in three tiers, and the blocks never merge them:
+# Metadata comes in three tiers, and the low-level APIs never merge them:
 #
 # .. list-table::
 #    :header-rows: 1
@@ -391,14 +412,14 @@ print(f"frame {i} at {target.pts_seconds:.3f}s")
 #      - Type
 #      - What it describes
 #    * - ``demuxer.metadata``
-#      - :class:`~torchcodec.decoders._blocks.DemuxerMetadata`
+#      - :class:`~torchcodec.decoders.DemuxerMetadata`
 #      - the container
 #    * - ``stream.metadata``
-#      - :class:`~torchcodec.decoders._blocks.VideoStreamHeaderMetadata` or
-#        :class:`~torchcodec.decoders._blocks.AudioStreamHeaderMetadata`
+#      - :class:`~torchcodec.decoders.VideoStreamHeaderMetadata` or
+#        :class:`~torchcodec.decoders.AudioStreamHeaderMetadata`
 #      - what the header claims about one stream
 #    * - ``video_stream.scan()``
-#      - :class:`~torchcodec.decoders._blocks.FrameIndex`
+#      - :class:`~torchcodec.decoders.FrameIndex`
 #      - what that stream's packets actually say
 #
 # The name of a field tells you which tier it came from, so a header value is
@@ -422,7 +443,8 @@ print(f"content:   {video.scan().num_frames_from_content} frames "
 # fields:
 #
 # - The **raw** ones, suffixed ``_from_header`` or ``_from_content``. Every one
-#   of them is available from the blocks too, on ``demuxer.metadata``, on
+#   of them is available from the low-level APIs too, on ``demuxer.metadata``,
+#   on
 #   ``stream.metadata``, or on the :class:`FrameIndex` a :term:`scan` returns.
 #   Same values, same names.
 # - A fourth, **"magic"** set with no suffix - ``num_frames``,
@@ -431,15 +453,15 @@ print(f"content:   {video.scan().num_frames_from_content} frames "
 #   *fallback chain* over the raw fields and hands you the first thing that
 #   isn't ``None``.
 #
-# **The blocks run no fallback logic at all**, so the magic set has no blocks
-# equivalent. What you get instead is every input those chains read from, which
-# you are free to combine yourself:
+# **The low-level APIs run no fallback logic at all**, so the magic set has no
+# low-level equivalent. What you get instead is every input those chains read
+# from, which you are free to combine yourself:
 #
 # .. list-table::
 #    :header-rows: 1
 #
 #    * - :class:`VideoDecoder.metadata <torchcodec.decoders.VideoDecoder>`
-#      - Blocks equivalent
+#      - Low-level equivalent
 #    * - ``width``, ``height``, ``codec``, ...
 #      - ``stream.metadata.<same name>``
 #    * - ``num_frames_from_header``
@@ -471,7 +493,7 @@ print(f"content:   {video.scan().num_frames_from_content} frames "
 # ``seek_mode``: ``"exact"`` (the default) scans up-front, ``"approximate"``
 # never does. So ``metadata.num_frames`` silently means a different thing
 # depending on how the decoder was built, and that is exactly the ambiguity the
-# blocks refuse to introduce.
+# low-level APIs refuse to introduce.
 #
 # :class:`~torchcodec.decoders.AudioDecoder` works the same way, with a smaller
 # magic set on :class:`~torchcodec.decoders.AudioStreamMetadata`:
@@ -487,19 +509,21 @@ print(f"content:   {video.scan().num_frames_from_content} frames "
 # :func:`get_container_metadata`: it reads the header and no packets, and it
 # also reports the streams a demuxer cannot follow, such as subtitles. It hands
 # back a :class:`ContainerMetadata`.
-from torchcodec.decoders._blocks import get_container_metadata
+from torchcodec.decoders import get_container_metadata
 
 for stream in get_container_metadata(av_path).streams:
     print(f"  stream {stream.stream_index}: {stream.media_type}, {stream.codec}")
 
 # %%
+# .. _low_level_unknown_length:
+#
 # Streams of unknown length
 # -------------------------
 #
-# One last thing the blocks make possible.
+# One last thing the low-level APIs make possible.
 # :class:`~torchcodec.decoders.VideoDecoder` needs a finite, seekable source: it
 # relies on the stream's duration and frame count, and in its default
-# ``seek_mode="exact"`` it scans the whole file up-front. The blocks never do
+# ``seek_mode="exact"`` it scans the whole file up-front. The stages never do
 # that: they consume packets as they arrive, so they can decode a source with no
 # duration, no frame count, and no end.
 #
@@ -538,9 +562,12 @@ ffmpeg.wait()
 # Where to go next
 # ----------------
 #
-# * :ref:`sphx_glr_generated_examples_blocks_pipelines.py` runs the stages
+# * :ref:`sphx_glr_generated_examples_low_level_pipelines.py` runs the stages
 #   concurrently on several threads, and shows where to split a pipeline on CPU
 #   and on CUDA.
-# * :ref:`sphx_glr_generated_examples_blocks_raw_data.py` skips the converters
+# * :ref:`sphx_glr_generated_examples_low_level_raw_data.py` skips the converters
 #   and reads the decoder's own YUV planes and audio samples, at the source's
 #   own precision.
+# * :ref:`sphx_glr_generated_examples_low_level_cuda_streams.py` explains how to
+#   manage CUDA streams when you consume a :class:`RawFrame` on a different CUDA
+#   stream than the one it was decoded on.
