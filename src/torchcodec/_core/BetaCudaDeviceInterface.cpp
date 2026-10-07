@@ -921,14 +921,14 @@ int BetaCudaDeviceInterface::frame_ready_for_decoding(
   STD_TORCH_CHECK(decoder_, "Decoder not initialized before picture decode");
   // See the comment about surfaces in stream_property_change().
   for (const auto& queued_frame : ready_frames_) {
-    if (queued_frame.picture_index == pic_params->CurrPicIdx &&
-        discarded_timestamps_.count(queued_frame.timestamp) == 0) {
+    if (queued_frame.picture_index == get_curr_pic_idx(*pic_params) &&
+        discarded_timestamps_.count(get_timestamp(queued_frame)) == 0) {
       TC_LOG(
           "NVDEC is decoding into surface %d, which still holds the frame with "
           "pts %lld that hasn't been returned yet. That frame will be "
           "returned with the wrong content.",
-          pic_params->CurrPicIdx,
-          static_cast<long long>(queued_frame.timestamp));
+          get_curr_pic_idx(*pic_params),
+          static_cast<long long>(get_timestamp(queued_frame)));
     }
   }
 
@@ -950,7 +950,7 @@ int BetaCudaDeviceInterface::frame_ready_for_decoding(
 int BetaCudaDeviceInterface::frame_ready_in_display_order(
     CUVIDPARSERDISPINFO* disp_info) {
   if (track_pts_ourselves_ && !pending_pts_.empty()) {
-    disp_info->timestamp = pending_pts_.front();
+    set_timestamp(*disp_info, pending_pts_.front());
     pending_pts_.pop();
   }
   ready_frames_.push_back(*disp_info);

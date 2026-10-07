@@ -36,10 +36,11 @@
 //   rename shows up.
 //
 // - CUVIDPICPARAMS / RocdecPicParams have nothing in common internally
-//   (rocDecode's is VA-API-shaped), but no torchcodec code ever reads a field:
-//   a picture's parameters come from the parser callback and go straight back
-//   into cuvidDecodePicture() / rocDecDecodeFrame(). Only the type name
-//   matters.
+//   (rocDecode's is VA-API-shaped). A picture's parameters come from the
+//   parser callback and go straight back into cuvidDecodePicture() /
+//   rocDecDecodeFrame(), so for the most part only the type name matters. The
+//   one field torchcodec reads is the output surface index, CurrPicIdx vs
+//   curr_pic_idx, behind get_curr_pic_idx().
 //
 // - CUvideoparser, CUvideodecoder, RocdecVideoParser and rocDecDecoderHandle
 //   are all `void *`. Nothing portable can be done with one except hand it
@@ -292,6 +293,14 @@ inline void set_timestamp(CUVIDSOURCEDATAPACKET& packet, int64_t timestamp) {
   packet.pts = static_cast<RocdecTimeStamp>(timestamp);
 }
 
+inline void set_timestamp(CUVIDPARSERDISPINFO& disp_info, int64_t timestamp) {
+  disp_info.pts = static_cast<RocdecTimeStamp>(timestamp);
+}
+
+inline int get_curr_pic_idx(const CUVIDPICPARAMS& pic_params) {
+  return pic_params.curr_pic_idx;
+}
+
 #else
 
 inline int64_t get_timestamp(const CUVIDPARSERDISPINFO& disp_info) {
@@ -304,6 +313,14 @@ inline int64_t get_timestamp(const CUVIDSOURCEDATAPACKET& packet) {
 
 inline void set_timestamp(CUVIDSOURCEDATAPACKET& packet, int64_t timestamp) {
   packet.timestamp = static_cast<CUvideotimestamp>(timestamp);
+}
+
+inline void set_timestamp(CUVIDPARSERDISPINFO& disp_info, int64_t timestamp) {
+  disp_info.timestamp = static_cast<CUvideotimestamp>(timestamp);
+}
+
+inline int get_curr_pic_idx(const CUVIDPICPARAMS& pic_params) {
+  return pic_params.CurrPicIdx;
 }
 
 #endif // USE_ROCM
