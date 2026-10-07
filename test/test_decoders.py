@@ -1840,7 +1840,12 @@ class TestVideoDecoder:
         #   found no 8-bit surface to decode into (float32 already worked).
         decoder_gpu = VideoDecoder(asset.path, device="cuda", output_dtype=output_dtype)
         decoder_cpu = VideoDecoder(asset.path, device="cpu", output_dtype=output_dtype)
-        assert not decoder_gpu.cpu_fallback
+        # NVDEC decodes all of these natively. rocDecode offers no 4:4:4 or
+        # 12-bit surfaces, so there the stream legitimately goes to the CPU
+        # fallback. Asserting equality rather than skipping means a change in
+        # either direction still fails.
+        expect_fallback = is_rocm() and not asset.hw_decodable_on_rocm
+        assert bool(decoder_gpu.cpu_fallback) == expect_fallback
 
         gpu_frame = decoder_gpu.get_frame_at(0).data
         cpu_frame = decoder_cpu.get_frame_at(0).data
@@ -3103,7 +3108,13 @@ class TestVideoDecoder:
         # fallback to NV12 instead of falling back to the CPU. This NV12
         # fallback can only be done for SDR videos, not HDR videos where we'd be
         # losing precision.
-        assert not decoder.cpu_fallback
+        # The exception is a format the GPU has no surface for at all, like
+        # 12-bit HEVC on rocDecode: there the CPU fallback is the correct
+        # outcome, not a regression.
+        expect_fallback = (
+            device == "cuda" and is_rocm() and not asset.hw_decodable_on_rocm
+        )
+        assert bool(decoder.cpu_fallback) == expect_fallback
 
         for frame_index in frame_indices:
             frame = decoder[frame_index]

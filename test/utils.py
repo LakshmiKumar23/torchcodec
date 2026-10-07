@@ -825,6 +825,18 @@ class TestContainerFile:
 class TestVideo(TestContainerFile):
     """Base class for the *video* streams of a video container"""
 
+    # Whether a GPU hardware decoder is expected to decode this stream rather
+    # than hand it to the CPU fallback. True for almost everything.
+    #
+    # Only consulted on ROCm: NVDEC decodes every asset flagged below, so this
+    # must never change what NVIDIA asserts. rocDecode's support is reported
+    # per GPU by rocDecGetDecoderCaps() -- see DecoderCapsCache in
+    # BetaCudaDeviceInterface.cpp -- so an AMD part with wider support than the
+    # one we test on would make these flags wrong. That is the point at which
+    # to expose the caps query to Python and ask the hardware, instead of
+    # hard-coding the answer here.
+    hw_decodable_on_rocm: bool = True
+
     def get_base_path_by_index(
         self, idx: int, *, stream_index: int, filters: str | None = None
     ) -> pathlib.Path:
@@ -1211,6 +1223,8 @@ TEST_SRC_2_12BIT_HDR = TestVideo(
         0: TestVideoStreamInfo(width=320, height=180, num_color_channels=3),
     },
     frames={0: {}},
+    # rocDecode reports HEVC 8- and 10-bit only; 12-bit goes to the CPU fallback.
+    hw_decodable_on_rocm=False,
 )
 
 # ffmpeg -f lavfi -i testsrc2=duration=2:size=1280x720:rate=30 -c:v libx264 -profile:v baseline -level 3.1 -pix_fmt yuv420p -b:v 2500k -r 30 -movflags +faststart output_720p_2s.mp4
@@ -1355,6 +1369,8 @@ TESTSRC2_444_8BIT_HEVC = TestVideo(
         0: TestVideoStreamInfo(width=321, height=241, num_color_channels=3),
     },
     frames={0: {}},
+    # rocDecode reports HEVC 4:2:0 only; 4:4:4 goes to the CPU fallback.
+    hw_decodable_on_rocm=False,
 )
 
 TESTSRC2_444_10BIT_HEVC = TestVideo(
@@ -1364,6 +1380,8 @@ TESTSRC2_444_10BIT_HEVC = TestVideo(
         0: TestVideoStreamInfo(width=321, height=241, num_color_channels=3),
     },
     frames={0: {}},
+    # rocDecode reports HEVC 4:2:0 only; 4:4:4 goes to the CPU fallback.
+    hw_decodable_on_rocm=False,
 )
 
 TESTSRC2_444_12BIT_HEVC = TestVideo(
@@ -1373,6 +1391,8 @@ TESTSRC2_444_12BIT_HEVC = TestVideo(
         0: TestVideoStreamInfo(width=321, height=241, num_color_channels=3),
     },
     frames={0: {}},
+    # rocDecode reports HEVC 4:2:0 only; 4:4:4 goes to the CPU fallback.
+    hw_decodable_on_rocm=False,
 )
 
 # The sources whose frames don't come out as three YUV planes. libx264 accepts
