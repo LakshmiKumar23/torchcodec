@@ -1794,7 +1794,7 @@ class TestVideoDecoder:
             TESTSRC2_ODD_HEIGHT_AND_WIDTH_444,
         ),
     )
-    @pytest.mark.parametrize("device", ("cuda", "cuda:ffmpeg"))
+    @pytest.mark.parametrize("device", cuda_devices())
     @pytest.mark.parametrize("output_dtype", (torch.uint8, torch.float32))
     def test_odd_sized_videos_444(self, asset, device, output_dtype):
         # These are yuv444p H264 videos. On the beta CUDA backend, 4:4:4
