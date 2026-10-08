@@ -55,6 +55,30 @@ def needs_cuda(test_item):
     return pytest.mark.needs_cuda(test_item)
 
 
+# Decorator for skipping ROCm tests when ROCm isn't available. The tests are
+# effectively marked to be skipped in pytest_collection_modifyitems() of
+# conftest.py
+def needs_rocm(test_item):
+    return pytest.mark.needs_rocm(test_item)
+
+
+def is_rocm() -> bool:
+    # Whether torch was built against ROCm rather than CUDA. Note that
+    # torch.cuda.is_available() is True in a ROCm build: torch.device("cuda")
+    # *is* the AMD GPU there. So "do we have a GPU" and "is that GPU an NVIDIA
+    # one" are two different questions, and needs_cuda only answers the first.
+    return getattr(torch.version, "hip", None) is not None
+
+
+# Decorator for tests that need an NVIDIA GPU specifically, as opposed to any
+# GPU that torch spells "cuda". Use it only for things that have no AMD
+# counterpart at all, which today means the FFmpeg CUDA decoding backend. It is
+# distinct from needs_cuda, which passes on ROCm. Handled in
+# pytest_collection_modifyitems() of conftest.py.
+def needs_nvidia(test_item):
+    return pytest.mark.needs_nvidia(test_item)
+
+
 # Decorator for skipping ffmpeg tests when ffmpeg cli isn't available. The tests are
 # effectively marked to be skipped in pytest_collection_modifyitems() of
 # conftest.py
@@ -108,15 +132,25 @@ def all_supported_devices():
     return (
         "cpu",
         pytest.param("cuda", marks=pytest.mark.needs_cuda),
-        pytest.param(_CUDA_FFMPEG_DEVICE_STR, marks=pytest.mark.needs_cuda),
+        pytest.param(
+            _CUDA_FFMPEG_DEVICE_STR,
+            marks=[pytest.mark.needs_cuda, pytest.mark.needs_nvidia],
+        ),
     )
 
 
 def cuda_devices():
     return (
         pytest.param("cuda", marks=pytest.mark.needs_cuda),
-        pytest.param(_CUDA_FFMPEG_DEVICE_STR, marks=pytest.mark.needs_cuda),
+        pytest.param(
+            _CUDA_FFMPEG_DEVICE_STR,
+            marks=[pytest.mark.needs_cuda, pytest.mark.needs_nvidia],
+        ),
     )
+
+
+def rocm_devices():
+    return (pytest.param("cuda", marks=pytest.mark.needs_rocm),)
 
 
 def unsplit_device_str(device_str: str) -> str:
@@ -175,6 +209,16 @@ def cuda_version_used_for_building_torch() -> tuple[int, int | None]:
         return tuple(int(x) for x in torch.version.cuda.split("."))
 
 
+def rocm_version_used_for_building_torch() -> tuple[int, int] | None:
+    # Return the ROCm version that was used to build PyTorch.
+    # ROCm version format is like "6.2.41134" - we return (major, minor)
+    if not hasattr(torch.version, "hip") or torch.version.hip is None:
+        return None
+    else:
+        version_parts = torch.version.hip.split(".")
+        return tuple(int(x) for x in version_parts[:2])
+
+
 def psnr(a, b, max_val=255) -> float:
     # Return Peak Signal-to-Noise Ratio (PSNR) between two tensors a and b. The
     # higher, the better.
@@ -197,7 +241,14 @@ def psnr(a, b, max_val=255) -> float:
 def assert_frames_equal(*args, **kwargs):
     if sys.platform == "linux" and "x86" in platform.machine().lower():
         if args[0].device.type == "cuda":
-            atol = 3 if cuda_version_used_for_building_torch() >= (13, 0) else 2
+            # Determine tolerance based on CUDA/ROCm version
+            cuda_version = cuda_version_used_for_building_torch()
+            if cuda_version is not None:
+                atol = 3 if cuda_version >= (13, 0) else 2
+            else:
+                # ROCm case - use tolerance of 3 like CUDA 13+
+                atol = 3
+
             if ffmpeg_major_version == 4:
                 assert_tensor_close_on_at_least(
                     args[0], args[1], percentage=95, atol=atol
@@ -774,6 +825,18 @@ class TestContainerFile:
 class TestVideo(TestContainerFile):
     """Base class for the *video* streams of a video container"""
 
+    # Whether a GPU hardware decoder is expected to decode this stream rather
+    # than hand it to the CPU fallback. True for almost everything.
+    #
+    # Only consulted on ROCm: NVDEC decodes every asset flagged below, so this
+    # must never change what NVIDIA asserts. rocDecode's support is reported
+    # per GPU by rocDecGetDecoderCaps() -- see DecoderCapsCache in
+    # BetaCudaDeviceInterface.cpp -- so an AMD part with wider support than the
+    # one we test on would make these flags wrong. That is the point at which
+    # to expose the caps query to Python and ask the hardware, instead of
+    # hard-coding the answer here.
+    hw_decodable_on_rocm: bool = True
+
     def get_base_path_by_index(
         self, idx: int, *, stream_index: int, filters: str | None = None
     ) -> pathlib.Path:
@@ -1176,6 +1239,8 @@ TEST_SRC_2_12BIT_HDR = TestVideo(
         0: TestVideoStreamInfo(width=320, height=180, num_color_channels=3),
     },
     frames={0: {}},
+    # rocDecode reports HEVC 8- and 10-bit only; 12-bit goes to the CPU fallback.
+    hw_decodable_on_rocm=False,
 )
 
 # ffmpeg -f lavfi -i testsrc2=duration=2:size=1280x720:rate=30 -c:v libx264 -profile:v baseline -level 3.1 -pix_fmt yuv420p -b:v 2500k -r 30 -movflags +faststart output_720p_2s.mp4
@@ -1335,6 +1400,8 @@ TESTSRC2_444_8BIT_HEVC = TestVideo(
         0: TestVideoStreamInfo(width=321, height=241, num_color_channels=3),
     },
     frames={0: {}},
+    # rocDecode reports HEVC 4:2:0 only; 4:4:4 goes to the CPU fallback.
+    hw_decodable_on_rocm=False,
 )
 
 TESTSRC2_444_10BIT_HEVC = TestVideo(
@@ -1344,6 +1411,8 @@ TESTSRC2_444_10BIT_HEVC = TestVideo(
         0: TestVideoStreamInfo(width=321, height=241, num_color_channels=3),
     },
     frames={0: {}},
+    # rocDecode reports HEVC 4:2:0 only; 4:4:4 goes to the CPU fallback.
+    hw_decodable_on_rocm=False,
 )
 
 TESTSRC2_444_12BIT_HEVC = TestVideo(
@@ -1353,6 +1422,8 @@ TESTSRC2_444_12BIT_HEVC = TestVideo(
         0: TestVideoStreamInfo(width=321, height=241, num_color_channels=3),
     },
     frames={0: {}},
+    # rocDecode reports HEVC 4:2:0 only; 4:4:4 goes to the CPU fallback.
+    hw_decodable_on_rocm=False,
 )
 
 # The sources whose frames don't come out as three YUV planes. libx264 accepts

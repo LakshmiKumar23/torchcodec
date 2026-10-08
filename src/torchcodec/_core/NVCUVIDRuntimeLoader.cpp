@@ -17,7 +17,7 @@ bool load_nvcuvid_library() {
   return true;
 }
 } // namespace facebook::torchcodec
-#else
+#elif !defined(USE_ROCM)
 
 #include "NVCUVIDRuntimeLoader.h"
 #include "StableABICompat.h"
@@ -321,4 +321,224 @@ cuvidUnmapVideoFrame64(CUvideodecoder decoder, unsigned long long frame_ptr) {
 
 } // extern "C"
 
-#endif // FBCODE_CAFFE2
+#endif // FBCODE_CAFFE2 / !USE_ROCM
+
+#if defined(USE_ROCM)
+
+#include "NVCUVIDRuntimeLoader.h"
+#include "NvcuvidCompat.h"
+#include "StableABICompat.h"
+
+#include <dlfcn.h>
+#include <mutex>
+
+namespace facebook::torchcodec {
+
+/* clang-format off */
+// [Loading rocDecode at runtime]
+//
+// This is the ROCm counterpart of the NVCUVID loader above, and it exists for
+// exactly the same reason, restated for AMD: librocdecode.so.1 is packaged
+// separately from the HIP runtime, so a machine that has a torchcodec wheel and
+// a working GPU does not necessarily have it installed. If
+// libtorchcodec_coreN.so carried a link-time dependency on it, ld.so would have
+// to resolve that when the extension module is loaded, and `import torchcodec`
+// itself would fail on such a machine - not the GPU decode call, the import,
+// which would also take CPU decoding down with it. That is the exact failure
+// mode the NVCUVID loader was written to avoid after user reports, and linking
+// rocDecode would simply reintroduce it on the AMD side. Lazy binding is not a
+// way out: RTLD_LAZY defers *symbol* resolution, but a DT_NEEDED object still
+// has to be found at load time.
+//
+// So the ROCm build does not link librocdecode either. We dlopen() it on first
+// use, bind the entry points we need, and load_nvcuvid_library() returns false
+// if any of that fails. That false is the whole point: the caller in
+// BetaCudaDeviceInterface treats it as "no hardware decoder here" and falls
+// back to CPU decoding, so a missing rocDecode costs the user speed rather than
+// the ability to import the library at all.
+//
+// The mechanism is the same as the CUDA side (see the long note above), applied
+// one layer lower. There, the dlsym'd pointers are called by extern "C" cuvid*
+// definitions in this file. Here, the dlsym'd pointers are called by extern "C"
+// rocDec* definitions in this file, and the cuvid* entry points that the shared
+// NVDEC code actually compiles against are defined on top of *those* in the
+// USE_ROCM block at the end of BetaCudaDeviceInterface.cpp. Splitting it that
+// way keeps the two questions apart: this file answers "how do we call rocDecode
+// without linking it", and that one answers "how does NVCUVID map onto
+// rocDecode".
+//
+// Only the eight entry points the NVDEC code reaches are bound. rocDecode's
+// remaining public functions (rocDecGetDecodeStatus, rocDecReconfigureDecoder,
+// rocDecGetErrorName) are deliberately absent: binding a symbol we never call
+// would only add a way for the load to fail for no reason.
+
+// Function pointer types
+typedef rocDecStatus ROCDECAPI trocDecCreateVideoParser(RocdecVideoParser*, RocdecParserParams*);
+typedef rocDecStatus ROCDECAPI trocDecParseVideoData(RocdecVideoParser, RocdecSourceDataPacket*);
+typedef rocDecStatus ROCDECAPI trocDecDestroyVideoParser(RocdecVideoParser);
+typedef rocDecStatus ROCDECAPI trocDecGetDecoderCaps(RocdecDecodeCaps*);
+typedef rocDecStatus ROCDECAPI trocDecCreateDecoder(rocDecDecoderHandle*, RocDecoderCreateInfo*);
+typedef rocDecStatus ROCDECAPI trocDecDestroyDecoder(rocDecDecoderHandle);
+typedef rocDecStatus ROCDECAPI trocDecDecodeFrame(rocDecDecoderHandle, RocdecPicParams*);
+typedef rocDecStatus ROCDECAPI trocDecGetVideoFrame(rocDecDecoderHandle, int, void*[3], uint32_t*, RocdecProcParams*);
+/* clang-format on */
+
+// Global function pointers - will be dynamically loaded
+static trocDecCreateVideoParser* dl_rocDecCreateVideoParser = nullptr;
+static trocDecParseVideoData* dl_rocDecParseVideoData = nullptr;
+static trocDecDestroyVideoParser* dl_rocDecDestroyVideoParser = nullptr;
+static trocDecGetDecoderCaps* dl_rocDecGetDecoderCaps = nullptr;
+static trocDecCreateDecoder* dl_rocDecCreateDecoder = nullptr;
+static trocDecDestroyDecoder* dl_rocDecDestroyDecoder = nullptr;
+static trocDecDecodeFrame* dl_rocDecDecodeFrame = nullptr;
+static trocDecGetVideoFrame* dl_rocDecGetVideoFrame = nullptr;
+
+static void* g_rocdecode_handle = nullptr;
+static std::mutex g_rocdecode_mutex;
+
+bool is_loaded() {
+  return (
+      g_rocdecode_handle && dl_rocDecCreateVideoParser &&
+      dl_rocDecParseVideoData && dl_rocDecDestroyVideoParser &&
+      dl_rocDecGetDecoderCaps && dl_rocDecCreateDecoder &&
+      dl_rocDecDestroyDecoder && dl_rocDecDecodeFrame &&
+      dl_rocDecGetVideoFrame);
+}
+
+template <typename T>
+T* bind_function(const char* function_name) {
+  return reinterpret_cast<T*>(dlsym(g_rocdecode_handle, function_name));
+}
+
+bool load_library() {
+  // librocdecode.so.1 is the soname, which is what a runtime-only install
+  // ships. The unversioned name only exists when the development package is
+  // present, so it is the fallback rather than the first choice.
+  g_rocdecode_handle = dlopen("librocdecode.so.1", RTLD_NOW);
+  if (g_rocdecode_handle == nullptr) {
+    g_rocdecode_handle = dlopen("librocdecode.so", RTLD_NOW);
+  }
+  return g_rocdecode_handle != nullptr;
+}
+
+bool load_nvcuvid_library() {
+  // Loads rocDecode and all required function pointers.
+  // Returns true on success, false on failure.
+  //
+  // The NVCUVID name is kept because this is the hook the shared NVDEC code
+  // calls. On ROCm there is no NVCUVID to load, and this loads its stand-in.
+  std::lock_guard<std::mutex> lock(g_rocdecode_mutex);
+
+  if (is_loaded()) {
+    return true;
+  }
+
+  if (!load_library()) {
+    return false;
+  }
+
+  // Load all function pointers. They'll be set to nullptr if not found.
+  dl_rocDecCreateVideoParser =
+      bind_function<trocDecCreateVideoParser>("rocDecCreateVideoParser");
+  dl_rocDecParseVideoData =
+      bind_function<trocDecParseVideoData>("rocDecParseVideoData");
+  dl_rocDecDestroyVideoParser =
+      bind_function<trocDecDestroyVideoParser>("rocDecDestroyVideoParser");
+  dl_rocDecGetDecoderCaps =
+      bind_function<trocDecGetDecoderCaps>("rocDecGetDecoderCaps");
+  dl_rocDecCreateDecoder =
+      bind_function<trocDecCreateDecoder>("rocDecCreateDecoder");
+  dl_rocDecDestroyDecoder =
+      bind_function<trocDecDestroyDecoder>("rocDecDestroyDecoder");
+  dl_rocDecDecodeFrame = bind_function<trocDecDecodeFrame>("rocDecDecodeFrame");
+  dl_rocDecGetVideoFrame =
+      bind_function<trocDecGetVideoFrame>("rocDecGetVideoFrame");
+
+  return is_loaded();
+}
+
+} // namespace facebook::torchcodec
+
+extern "C" {
+
+rocDecStatus ROCDECAPI rocDecCreateVideoParser(
+    RocdecVideoParser* parser_handle,
+    RocdecParserParams* params) {
+  STD_TORCH_CHECK(
+      facebook::torchcodec::dl_rocDecCreateVideoParser,
+      "rocDecCreateVideoParser called but rocDecode not loaded!");
+  return facebook::torchcodec::dl_rocDecCreateVideoParser(
+      parser_handle, params);
+}
+
+rocDecStatus ROCDECAPI rocDecParseVideoData(
+    RocdecVideoParser parser_handle,
+    RocdecSourceDataPacket* packet) {
+  STD_TORCH_CHECK(
+      facebook::torchcodec::dl_rocDecParseVideoData,
+      "rocDecParseVideoData called but rocDecode not loaded!");
+  return facebook::torchcodec::dl_rocDecParseVideoData(parser_handle, packet);
+}
+
+rocDecStatus ROCDECAPI
+rocDecDestroyVideoParser(RocdecVideoParser parser_handle) {
+  STD_TORCH_CHECK(
+      facebook::torchcodec::dl_rocDecDestroyVideoParser,
+      "rocDecDestroyVideoParser called but rocDecode not loaded!");
+  return facebook::torchcodec::dl_rocDecDestroyVideoParser(parser_handle);
+}
+
+rocDecStatus ROCDECAPI rocDecGetDecoderCaps(RocdecDecodeCaps* decode_caps) {
+  STD_TORCH_CHECK(
+      facebook::torchcodec::dl_rocDecGetDecoderCaps,
+      "rocDecGetDecoderCaps called but rocDecode not loaded!");
+  return facebook::torchcodec::dl_rocDecGetDecoderCaps(decode_caps);
+}
+
+rocDecStatus ROCDECAPI rocDecCreateDecoder(
+    rocDecDecoderHandle* decoder_handle,
+    RocDecoderCreateInfo* decoder_create_info) {
+  STD_TORCH_CHECK(
+      facebook::torchcodec::dl_rocDecCreateDecoder,
+      "rocDecCreateDecoder called but rocDecode not loaded!");
+  return facebook::torchcodec::dl_rocDecCreateDecoder(
+      decoder_handle, decoder_create_info);
+}
+
+rocDecStatus ROCDECAPI
+rocDecDestroyDecoder(rocDecDecoderHandle decoder_handle) {
+  STD_TORCH_CHECK(
+      facebook::torchcodec::dl_rocDecDestroyDecoder,
+      "rocDecDestroyDecoder called but rocDecode not loaded!");
+  return facebook::torchcodec::dl_rocDecDestroyDecoder(decoder_handle);
+}
+
+rocDecStatus ROCDECAPI rocDecDecodeFrame(
+    rocDecDecoderHandle decoder_handle,
+    RocdecPicParams* pic_params) {
+  STD_TORCH_CHECK(
+      facebook::torchcodec::dl_rocDecDecodeFrame,
+      "rocDecDecodeFrame called but rocDecode not loaded!");
+  return facebook::torchcodec::dl_rocDecDecodeFrame(decoder_handle, pic_params);
+}
+
+rocDecStatus ROCDECAPI rocDecGetVideoFrame(
+    rocDecDecoderHandle decoder_handle,
+    int pic_idx,
+    void* dev_mem_ptr[3],
+    uint32_t* horizontal_pitch,
+    RocdecProcParams* vid_postproc_params) {
+  STD_TORCH_CHECK(
+      facebook::torchcodec::dl_rocDecGetVideoFrame,
+      "rocDecGetVideoFrame called but rocDecode not loaded!");
+  return facebook::torchcodec::dl_rocDecGetVideoFrame(
+      decoder_handle,
+      pic_idx,
+      dev_mem_ptr,
+      horizontal_pitch,
+      vid_postproc_params);
+}
+
+} // extern "C"
+
+#endif // USE_ROCM

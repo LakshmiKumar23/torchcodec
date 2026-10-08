@@ -104,9 +104,11 @@ from .utils import (
     GRAYSCALE_JPEG,
     GRAYSCALE_PNG,
     H264_10BITS,
+    H265_10BITS,
     H265_VIDEO,
     HEAPBOF_PNG,
     in_fbcode,
+    is_rocm,
     IS_WINDOWS,
     make_video_decoder,
     NASA_AUDIO,
@@ -120,7 +122,9 @@ from .utils import (
     needs_ffmpeg_cli,
     needs_heic,
     needs_jpeg,
+    needs_nvidia,
     needs_png,
+    needs_rocm,
     needs_webp,
     NVDEC_SURFACE_REUSE_VIDEO,
     psnr,
@@ -292,6 +296,25 @@ class TestDecoder:
     @pytest.mark.parametrize("Decoder", (VideoDecoder, AudioDecoder))
     def test_no_network_access(self, Decoder, tmp_path):
         _assert_local_file_and_file_like_agree(Decoder, tmp_path)
+
+
+def _reference_decoder(asset, seek_mode):
+    # Reference decoder and pixel tolerance for the hardware-decoder interface
+    # tests, which compare the default CUDA backend against a reference.
+    #
+    # On NVIDIA, the reference is the FFmpeg CUDA backend and the comparison is
+    # bit-exact. On ROCm there is no FFmpeg CUDA backend to compare against --
+    # it is NVIDIA-only and raises there -- so the reference is the CPU decoder
+    # instead, and the comparison is not bit-exact: rocDecode's color
+    # conversion differs slightly from swscale's.
+    #
+    # The returned reference may therefore live on a different device than the
+    # decoder under test, so callers must move frames onto the reference's
+    # device before comparing.
+    if is_rocm():
+        return VideoDecoder(asset.path, device="cpu", seek_mode=seek_mode), 3
+    with set_cuda_backend("ffmpeg"):
+        return VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode), 0
 
 
 class TestVideoDecoder:
@@ -1771,7 +1794,7 @@ class TestVideoDecoder:
             TESTSRC2_ODD_HEIGHT_AND_WIDTH_444,
         ),
     )
-    @pytest.mark.parametrize("device", ("cuda", "cuda:ffmpeg"))
+    @pytest.mark.parametrize("device", cuda_devices())
     @pytest.mark.parametrize("output_dtype", (torch.uint8, torch.float32))
     def test_odd_sized_videos_444(self, asset, device, output_dtype):
         # These are yuv444p H264 videos. On the beta CUDA backend, 4:4:4
@@ -1817,7 +1840,12 @@ class TestVideoDecoder:
         #   found no 8-bit surface to decode into (float32 already worked).
         decoder_gpu = VideoDecoder(asset.path, device="cuda", output_dtype=output_dtype)
         decoder_cpu = VideoDecoder(asset.path, device="cpu", output_dtype=output_dtype)
-        assert not decoder_gpu.cpu_fallback
+        # NVDEC decodes all of these natively. rocDecode offers no 4:4:4 or
+        # 12-bit surfaces, so there the stream legitimately goes to the CPU
+        # fallback. Asserting equality rather than skipping means a change in
+        # either direction still fails.
+        expect_fallback = is_rocm() and not asset.hw_decodable_on_rocm
+        assert bool(decoder_gpu.cpu_fallback) == expect_fallback
 
         gpu_frame = decoder_gpu.get_frame_at(0).data
         cpu_frame = decoder_cpu.get_frame_at(0).data
@@ -1916,6 +1944,7 @@ class TestVideoDecoder:
         )
 
     @needs_cuda
+    @needs_nvidia
     def test_10bit_gpu_fallsback_to_cpu(self):
         # Test for 10-bit videos that aren't supported by NVDEC: we decode and
         # do the color conversion on the CPU.
@@ -2079,8 +2108,13 @@ class TestVideoDecoder:
         decoder.get_frames_played_at(torch.tensor([0, 1], dtype=torch.float))
 
     # Note [NVDEC vs FFmpeg CUDA pixel mismatches]:
-    # These tests compare the NVDEC (beta) CUDA backend against the FFmpeg
-    # CUDA backend. There are two known sources of pixel mismatches:
+    # These tests compare the default CUDA backend against a reference decoder
+    # supplied by _reference_decoder(): the FFmpeg CUDA backend on NVIDIA, or
+    # the CPU decoder on ROCm, where the FFmpeg CUDA backend does not exist.
+    # The ROCm comparison is tolerant (atol=3) because rocDecode's color
+    # conversion differs slightly from swscale's; the notes below are about the
+    # NVIDIA comparison, which is otherwise bit-exact. There are two known
+    # sources of pixel mismatches there:
     #
     # 1. FFmpeg 4: small pixel differences on a few pixels (< 1%), cause
     #    unknown. We don't investigate further since FFmpeg 4 is not a
@@ -2118,8 +2152,7 @@ class TestVideoDecoder:
     def test_nvdec_cuda_interface_get_frame_at(
         self, asset, contiguous_indices, seek_mode
     ):
-        with set_cuda_backend("ffmpeg"):
-            ref_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
+        ref_decoder, atol = _reference_decoder(asset, seek_mode)
         nvdec_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
 
         assert ref_decoder.metadata == nvdec_decoder.metadata
@@ -2135,7 +2168,10 @@ class TestVideoDecoder:
             # See Note [NVDEC vs FFmpeg CUDA pixel mismatches]
             if ffmpeg_major_version > 5 and asset is not TEST_SRC_2_720P_MPEG4:
                 torch.testing.assert_close(
-                    nvdec_frame.data, ref_frame.data, rtol=0, atol=0
+                    nvdec_frame.data.to(ref_frame.data.device),
+                    ref_frame.data,
+                    rtol=0,
+                    atol=atol,
                 )
 
             assert nvdec_frame.pts_seconds == ref_frame.pts_seconds
@@ -2165,8 +2201,7 @@ class TestVideoDecoder:
     def test_nvdec_cuda_interface_get_frames_at(
         self, asset, contiguous_indices, seek_mode
     ):
-        with set_cuda_backend("ffmpeg"):
-            ref_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
+        ref_decoder, atol = _reference_decoder(asset, seek_mode)
         nvdec_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
 
         assert ref_decoder.metadata == nvdec_decoder.metadata
@@ -2182,7 +2217,10 @@ class TestVideoDecoder:
         # See Note [NVDEC vs FFmpeg CUDA pixel mismatches]
         if ffmpeg_major_version > 5 and asset is not TEST_SRC_2_720P_MPEG4:
             torch.testing.assert_close(
-                nvdec_frames.data, ref_frames.data, rtol=0, atol=0
+                nvdec_frames.data.to(ref_frames.data.device),
+                ref_frames.data,
+                rtol=0,
+                atol=atol,
             )
         torch.testing.assert_close(nvdec_frames.pts_seconds, ref_frames.pts_seconds)
         torch.testing.assert_close(
@@ -2210,8 +2248,7 @@ class TestVideoDecoder:
     )
     @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
     def test_nvdec_cuda_interface_get_frame_played_at(self, asset, seek_mode):
-        with set_cuda_backend("ffmpeg"):
-            ref_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
+        ref_decoder, atol = _reference_decoder(asset, seek_mode)
         nvdec_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
 
         assert ref_decoder.metadata == nvdec_decoder.metadata
@@ -2225,7 +2262,10 @@ class TestVideoDecoder:
             # See Note [NVDEC vs FFmpeg CUDA pixel mismatches]
             if ffmpeg_major_version > 5 and asset is not TEST_SRC_2_720P_MPEG4:
                 torch.testing.assert_close(
-                    nvdec_frame.data, ref_frame.data, rtol=0, atol=0
+                    nvdec_frame.data.to(ref_frame.data.device),
+                    ref_frame.data,
+                    rtol=0,
+                    atol=atol,
                 )
 
             assert nvdec_frame.pts_seconds == ref_frame.pts_seconds
@@ -2252,8 +2292,7 @@ class TestVideoDecoder:
     )
     @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
     def test_nvdec_cuda_interface_get_frames_played_at(self, asset, seek_mode):
-        with set_cuda_backend("ffmpeg"):
-            ref_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
+        ref_decoder, atol = _reference_decoder(asset, seek_mode)
         nvdec_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
 
         assert ref_decoder.metadata == nvdec_decoder.metadata
@@ -2267,7 +2306,10 @@ class TestVideoDecoder:
         # See Note [NVDEC vs FFmpeg CUDA pixel mismatches]
         if ffmpeg_major_version > 5 and asset is not TEST_SRC_2_720P_MPEG4:
             torch.testing.assert_close(
-                nvdec_frames.data, ref_frames.data, rtol=0, atol=0
+                nvdec_frames.data.to(ref_frames.data.device),
+                ref_frames.data,
+                rtol=0,
+                atol=atol,
             )
         torch.testing.assert_close(nvdec_frames.pts_seconds, ref_frames.pts_seconds)
         torch.testing.assert_close(
@@ -2295,8 +2337,7 @@ class TestVideoDecoder:
     )
     @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
     def test_nvdec_cuda_interface_backwards(self, asset, seek_mode):
-        with set_cuda_backend("ffmpeg"):
-            ref_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
+        ref_decoder, atol = _reference_decoder(asset, seek_mode)
         nvdec_decoder = VideoDecoder(asset.path, device="cuda", seek_mode=seek_mode)
 
         assert ref_decoder.metadata == nvdec_decoder.metadata
@@ -2314,13 +2355,17 @@ class TestVideoDecoder:
             # See Note [NVDEC vs FFmpeg CUDA pixel mismatches]
             if ffmpeg_major_version > 5 and asset is not TEST_SRC_2_720P_MPEG4:
                 torch.testing.assert_close(
-                    nvdec_frame.data, ref_frame.data, rtol=0, atol=0
+                    nvdec_frame.data.to(ref_frame.data.device),
+                    ref_frame.data,
+                    rtol=0,
+                    atol=atol,
                 )
 
             assert nvdec_frame.pts_seconds == ref_frame.pts_seconds
             assert nvdec_frame.duration_seconds == ref_frame.duration_seconds
 
     @needs_cuda
+    @needs_nvidia
     @pytest.mark.parametrize("seek_mode", ("exact", "approximate"))
     def test_cuda_mpeg4_mp4_first_frame(self, seek_mode):
         # non-regression test for
@@ -2379,6 +2424,7 @@ class TestVideoDecoder:
             )
             assert mean_abs_diff < 5
 
+    @needs_nvidia
     @needs_cuda
     def test_nvdec_cuda_interface_cpu_fallback(self):
         # Non-regression test for the CPU fallback behavior of the NVDEC CUDA
@@ -2484,6 +2530,7 @@ class TestVideoDecoder:
             assert_frames_equal(gpu_decoder[index], cpu_decoder[index].to("cuda"))
 
     @needs_cuda
+    @needs_nvidia
     def test_set_cuda_backend(self):
         # Tests for the set_cuda_backend() context manager.
 
@@ -2589,6 +2636,207 @@ class TestVideoDecoder:
             # Create a new decoder, it's not cached since capacity is 0
             create_decoder()
             assert _core._get_nvdec_cache_size(device_index=0) == 0
+
+    # ===== ROCm rocDecode Interface Tests =====
+    #
+    # Only behavior that genuinely differs from NVDEC belongs here. The
+    # interface tests above (test_nvdec_cuda_interface_*) now run on ROCm too,
+    # against the reference from _reference_decoder(), and the generic
+    # test_get_*_fails tests already cover ROCm via all_supported_devices().
+
+    @needs_rocm
+    def test_rocm_interface_cpu_fallback(self):
+        """Test ROCm interface CPU fallback status reporting."""
+        # Note: H265_VIDEO triggers CPU fallback on CUDA/NVDEC due to small
+        # dimensions (128x128), but rocDecode supports it with hardware decoding.
+        # This test verifies that fallback status is reported correctly.
+        rocm_dec = VideoDecoder(H265_VIDEO.path, device="cuda")
+
+        # Fallback status should be known immediately for ROCm (like beta CUDA)
+        assert rocm_dec.cpu_fallback.status_known
+
+        # rocDecode may or may not fall back for this video - both are valid
+        # If it does fall back, verify the reason is reported
+        if rocm_dec.cpu_fallback:
+            assert "Video not supported" in str(rocm_dec.cpu_fallback)
+
+        # Verify frames decode correctly regardless of fallback
+        frame = rocm_dec.get_frame_at(0)
+        assert frame.data.device.type == "cuda"  # Still on GPU memory
+
+        # Compare with CPU decoder to ensure correctness
+        cpu_dec = VideoDecoder(H265_VIDEO.path, device="cpu")
+        cpu_frame = cpu_dec.get_frame_at(0)
+        # Allow small tolerance for GPU vs CPU color conversion differences
+        # Only 0.5% of pixels differ by up to 6 due to rounding
+        torch.testing.assert_close(frame.data.cpu(), cpu_frame.data, rtol=0, atol=6)
+
+    @needs_rocm
+    def test_rocm_h265_10bit_hardware_support(self):
+        """Test that H.265 10-bit videos are decoded by rocDecode hardware.
+
+        Expect uint8 RGB (CHW) as expected by torchcodec.
+
+        Compared against the CPU decoder with the same check
+        test_bt2020_10bit_video applies to NVDEC, which carries the same
+        standing TODO about a CPU-vs-GPU mismatch on 10-bit content. The cause
+        is the chroma upsampling filter. For >8bit input swscale has no
+        unscaled fast path, so the CPU reference goes through the general
+        scaler and gets interpolated chroma, while the shared CUDA/HIP kernel
+        replicates chroma (one UV pair per 2x2 block, color_conversion.cu).
+        Measured on this asset: the GPU frames match
+        `ffmpeg -sws_flags neighbor+full_chroma_int` on every pixel within
+        atol=3, and the CPU frames match `-sws_flags bicubic` exactly. So the
+        residual is the filter and nothing else - not the bit depth, not the
+        colorspace, and not anything ROCm-specific: NVDEC has it too.
+
+        This does not reach 90% on every frame (measured 91.96 / 89.95 / 89.78
+        / 91.06 for the four indices below), which is why the threshold here is
+        89 rather than 90. That is the same value the other GPU-vs-CPU
+        comparisons in this file already use where the chroma filter differs -
+        see test_odd_sized_videos_444 and test_odd_sized_videos_vp9. Closing
+        the remaining gap needs a bit-depth-dependent chroma filter in the
+        shared kernel.
+        """
+
+        asset = H265_10BITS
+
+        decoder_rocm = VideoDecoder(asset.path, device="cuda")
+
+        assert decoder_rocm.cpu_fallback.status_known
+        assert (
+            not decoder_rocm.cpu_fallback
+        ), "H.265 10-bit should be hardware-decoded by rocDecode"
+
+        decoder_cpu = VideoDecoder(asset.path)
+
+        for frame_index in (0, 10, 20, 5):
+            frame_rocm = decoder_rocm.get_frame_at(frame_index).data
+            assert frame_rocm.device.type == "cuda"
+            assert (
+                frame_rocm.dtype == torch.uint8
+            ), f"Expected uint8 output, got {frame_rocm.dtype}"
+
+            frame_cpu = decoder_cpu.get_frame_at(frame_index).data
+            assert frame_cpu.dtype == torch.uint8
+
+            assert_tensor_close_on_at_least(
+                frame_rocm, frame_cpu.to("cuda"), percentage=89, atol=3
+            )
+
+    @needs_rocm
+    def test_rocm_h264_10bit_cpu_fallback(self):
+        """Test that H.264 10-bit videos fall back to CPU (not supported by rocDecode)."""
+        # rocDecode does NOT support H.264 10-bit, should fall back to CPU
+        asset = H264_10BITS
+
+        decoder_rocm = VideoDecoder(asset.path, device="cuda")
+
+        # H.264 10-bit should trigger CPU fallback
+        assert decoder_rocm.cpu_fallback.status_known
+        assert (
+            decoder_rocm.cpu_fallback
+        ), "H.264 10-bit should fall back to CPU on rocDecode"
+        # Fallback reason may vary, just verify fallback is happening
+        assert "Falling back" in str(decoder_rocm.cpu_fallback)
+
+        decoder_cpu = VideoDecoder(asset.path)
+
+        frame_indices = [0, 10, 20, 5]
+        for frame_index in frame_indices:
+            frame_rocm = decoder_rocm.get_frame_at(frame_index).data
+            assert frame_rocm.device.type == "cuda"  # Still on GPU memory
+            assert (
+                frame_rocm.dtype == torch.uint8
+            ), f"Expected uint8 from CPU fallback, got {frame_rocm.dtype}"
+
+            frame_cpu = decoder_cpu.get_frame_at(frame_index).data
+            assert (
+                frame_cpu.dtype == torch.uint8
+            ), f"Expected uint8 from CPU decoder, got {frame_cpu.dtype}"
+
+            # CPU fallback goes through: CPU decode → NV12 conversion → GPU transfer → RGB conversion
+            # Direct CPU goes through: CPU decode → RGB24 conversion
+            # Double color conversion introduces differences, so use PSNR threshold
+            # For 10-bit videos decoded as 8-bit, PSNR > 23 dB indicates good quality match
+            frame_psnr = psnr(frame_rocm.cpu(), frame_cpu)
+            assert (
+                frame_psnr > 23
+            ), f"PSNR {frame_psnr:.2f} dB is too low for frame {frame_index}"
+
+        # Check batch API also uses PSNR threshold
+        frames_rocm = decoder_rocm.get_frames_at(frame_indices).data
+        assert frames_rocm.device.type == "cuda"
+        frames_cpu = decoder_cpu.get_frames_at(frame_indices).data
+        batch_psnr = psnr(frames_rocm.cpu(), frames_cpu)
+        assert batch_psnr > 23, f"Batch PSNR {batch_psnr:.2f} dB is too low"
+
+    @needs_rocm
+    def test_rocm_av1_video_support(self):
+        """Test that AV1 videos are decoded by rocDecode hardware.
+
+        Note: AV1 hardware vs software decoding has larger differences than other codecs,
+        so we use PSNR validation instead of pixel-wise comparison.
+        """
+        # rocDecode supports AV1 codec
+        asset = AV1_VIDEO
+
+        decoder_rocm = VideoDecoder(asset.path, device="cuda")
+
+        # AV1 should NOT trigger CPU fallback
+        assert decoder_rocm.cpu_fallback.status_known
+        assert (
+            not decoder_rocm.cpu_fallback
+        ), "AV1 should be hardware-decoded by rocDecode"
+
+        decoder_cpu = VideoDecoder(asset.path)
+
+        # Test a few frames
+        frame_indices = [0, 5, 10]
+        for frame_index in frame_indices:
+            frame_rocm = decoder_rocm.get_frame_at(frame_index).data
+            assert frame_rocm.device.type == "cuda"
+            assert frame_rocm.dtype == torch.uint8
+
+            frame_cpu = decoder_cpu.get_frame_at(frame_index).data
+            assert frame_cpu.dtype == torch.uint8
+
+            # AV1 codec has significant hardware vs software implementation differences
+            # Use PSNR validation to measure perceptual quality rather than exact pixel matching
+            frame_psnr = psnr(frame_rocm.cpu(), frame_cpu)
+            assert (
+                frame_psnr > 25
+            ), f"PSNR {frame_psnr:.2f} dB is too low for AV1 frame {frame_index}"
+
+    @needs_rocm
+    def test_rocm_vp9_video_support(self):
+        """Test that VP9 videos are decoded by rocDecode hardware."""
+        # rocDecode supports VP9 codec
+        asset = TEST_SRC_2_720P_VP9
+
+        decoder_rocm = VideoDecoder(asset.path, device="cuda")
+
+        # VP9 should NOT trigger CPU fallback
+        assert decoder_rocm.cpu_fallback.status_known
+        assert (
+            not decoder_rocm.cpu_fallback
+        ), "VP9 should be hardware-decoded by rocDecode"
+
+        decoder_cpu = VideoDecoder(asset.path)
+
+        # Test a few frames
+        frame_indices = [0, 5, 10]
+        for frame_index in frame_indices:
+            frame_rocm = decoder_rocm.get_frame_at(frame_index).data
+            assert frame_rocm.device.type == "cuda"
+            assert frame_rocm.dtype == torch.uint8
+
+            frame_cpu = decoder_cpu.get_frame_at(frame_index).data
+
+            # Hardware vs software decoding differences, use tolerance
+            # Move CPU frame to GPU to use CUDA/ROCm tolerance path
+            frame_cpu_gpu = frame_cpu.to("cuda")
+            assert_frames_equal(frame_rocm, frame_cpu_gpu)
 
     @needs_cuda
     def test_nvdec_cache_different_display_areas(self):
@@ -2788,11 +3036,18 @@ class TestVideoDecoder:
         assert frames.data.shape == (2, 3, 100, 100)
 
     @needs_cuda
+    @needs_nvidia
     @pytest.mark.parametrize("device", cuda_devices())
     def test_cpu_fallback_h265_video(self, device):
         """Test that H265 video triggers CPU fallback on CUDA interfaces."""
         # H265_VIDEO is known to trigger CPU fallback on CUDA
-        # because its dimensions are too small
+        # because its dimensions are too small.
+        #
+        # The premise is NVDEC's size floor, which is above this clip's
+        # 128x128. rocDecode's floor is 64x64, so it decodes the clip in
+        # hardware and reports no fallback; test_rocm_interface_cpu_fallback
+        # covers the same asset on ROCm. Same reasoning as the
+        # h265-too-small-for-nvdec param of test_cpu_fallback_is_on_cuda.
         decoder, _ = make_video_decoder(H265_VIDEO.path, device=device)
 
         if "ffmpeg" in device:
@@ -2893,7 +3148,13 @@ class TestVideoDecoder:
         # fallback to NV12 instead of falling back to the CPU. This NV12
         # fallback can only be done for SDR videos, not HDR videos where we'd be
         # losing precision.
-        assert not decoder.cpu_fallback
+        # The exception is a format the GPU has no surface for at all, like
+        # 12-bit HEVC on rocDecode: there the CPU fallback is the correct
+        # outcome, not a regression.
+        expect_fallback = (
+            device == "cuda" and is_rocm() and not asset.hw_decodable_on_rocm
+        )
+        assert bool(decoder.cpu_fallback) == expect_fallback
 
         for frame_index in frame_indices:
             frame = decoder[frame_index]
@@ -4744,8 +5005,17 @@ class TestLowLevel:
     @pytest.mark.parametrize(
         "video, expected_pix_fmt",
         (
-            # Too small for NVDEC.
-            (H265_VIDEO, "nv12"),
+            # Too small for NVDEC, whose HEVC floor is above this clip's
+            # 128x128. rocDecode's floor is 64x64 (`videodecodecaps` on
+            # gfx1100), so it decodes this in hardware and never falls back -
+            # the premise is NVIDIA-specific, not behavior under test. The
+            # 4:4:4 params below cover the fallback path on both backends.
+            pytest.param(
+                H265_VIDEO,
+                "nv12",
+                marks=pytest.mark.needs_nvidia,
+                id="h265-too-small-for-nvdec",
+            ),
             # H264 4:4:4, which NVDEC can't decode. Uploading it as NV12 would
             # halve its chroma resolution, so it stays 4:4:4.
             (TESTSRC2_ODD_HEIGHT_AND_WIDTH_444, "yuv444p"),
@@ -6312,7 +6582,10 @@ def _jpeg_cuda_param(*values):
     return pytest.param(
         partial(decode_jpeg, device="cuda"),
         *values,
-        marks=(pytest.mark.needs_jpeg, pytest.mark.needs_cuda),
+        marks=(
+            pytest.mark.needs_jpeg,
+            pytest.mark.needs_cuda,
+        ),
         id="jpeg_cuda",
     )
 

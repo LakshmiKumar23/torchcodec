@@ -16,6 +16,21 @@ if(SKBUILD_STATE STREQUAL "wheel"
         "then set I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION.")
 endif()
 
+# The two GPU backends are mutually exclusive by construction. The color
+# conversion kernels and the CUDA runtime calls in CUDACommon /
+# BetaCudaDeviceInterface are a *single* set of sources, compiled either as CUDA
+# or as HIP, with GpuCompat.h aliasing the CUDA spellings onto HIP when USE_ROCM
+# is defined. Setting both flags would append both source lists, define both
+# USE_CUDA and USE_ROCM, and force color_conversion.cu to the HIP language for
+# everyone - so fail loudly here rather than build a library against the wrong
+# backend. Each CI job builds exactly one backend, so this only catches a stale
+# ENABLE_ROCM/ENABLE_CUDA in a developer's environment.
+if(ENABLE_CUDA AND ENABLE_ROCM)
+    message(FATAL_ERROR
+        "ENABLE_CUDA and ENABLE_ROCM cannot both be set: torchcodec builds "
+        "exactly one GPU backend at a time. Unset one of them and reconfigure.")
+endif()
+
 set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 REQUIRED)
 find_package(Torch REQUIRED)
@@ -187,6 +202,7 @@ read_sources_from_bzl(TORCHCODEC_DECODER_CORE_SOURCES decoder_core_sources)
 read_sources_from_bzl(TORCHCODEC_FFMPEG_COMMON_SOURCES ffmpeg_common_sources)
 read_sources_from_bzl(TORCHCODEC_IO_SOURCES io_sources)
 read_sources_from_bzl(TORCHCODEC_DECODER_CORE_CUDA_SOURCES decoder_core_cuda_sources)
+read_sources_from_bzl(TORCHCODEC_DECODER_CORE_ROCM_SOURCES decoder_core_rocm_sources)
 read_sources_from_bzl(TORCHCODEC_FILE_LIKE_CONTEXT_SOURCES file_like_context_sources)
 read_sources_from_bzl(TORCHCODEC_CUSTOM_OPS_SOURCES custom_ops_sources)
 read_sources_from_bzl(TORCHCODEC_PYBIND_OPS_SOURCES pybind_ops_sources)
@@ -332,6 +348,55 @@ function(make_torchcodec_libraries
         list(APPEND core_sources ${TORCHCODEC_DECODER_CORE_CUDA_SOURCES})
     endif()
 
+    set(_torchcodec_rocm_deps_ok FALSE)
+    if(ENABLE_ROCM)
+        # ROCm builds require HIP and the rocDecode CMake package from the same
+        # ROCm install (https://github.com/ROCm/TheRock)
+        if(DEFINED ENV{ROCM_PATH})
+            list(APPEND CMAKE_PREFIX_PATH "$ENV{ROCM_PATH}")
+        else()
+            message(
+                WARNING
+                "ENABLE_ROCM is set but ROCM_PATH is not defined in the environment. "
+                "Set it to your ROCm install prefix (for example: export ROCM_PATH=/opt/rocm) "
+                "and reconfigure/rebuild."
+            )
+        endif()
+        find_package(hip QUIET)
+        find_package(rocdecode 1.8.0 CONFIG QUIET)
+        if(hip_FOUND AND rocdecode_FOUND)
+            set(_torchcodec_rocm_deps_ok TRUE)
+        else()
+            set(_missing_rocm_deps "")
+            if(NOT hip_FOUND)
+                list(APPEND _missing_rocm_deps "HIP")
+            endif()
+            if(NOT rocdecode_FOUND)
+                list(APPEND _missing_rocm_deps "rocDecode (>= 1.8.0, CONFIG)")
+            endif()
+            message(
+                WARNING
+                "ENABLE_ROCM requires HIP and rocDecode. Missing: ${_missing_rocm_deps}. "
+                "Skipping ROCm support. Set ROCM_PATH if CMake cannot find your ROCm install."
+            )
+            set(ENABLE_ROCM OFF)
+        endif()
+    endif()
+
+    if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
+        # Note that the HIP language itself is enabled at file scope, near the
+        # bottom of this file - see the comment there for why it cannot live
+        # here with the rest of the ROCm setup.
+        list(APPEND core_sources ${TORCHCODEC_DECODER_CORE_ROCM_SOURCES})
+        # The color conversion kernels are shared with the CUDA build and so are
+        # named .cu. CMake maps that extension to the CUDA language, which is not
+        # enabled here, so the language has to be set explicitly.
+        set_source_files_properties(
+            color_conversion.cu
+            PROPERTIES LANGUAGE HIP
+        )
+    endif()
+
     set(core_library_dependencies
         ${ffmpeg_target}
         ${TORCH_LIBRARIES}
@@ -358,6 +423,29 @@ function(make_torchcodec_libraries
             target_compile_options(${core_library_name} PRIVATE
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
         endif()
+    endif()
+
+    if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
+        # Link ROCm libraries and add include directories.
+        #
+        # rocdecode::rocdecode is deliberately NOT linked. librocdecode.so.1 is
+        # packaged separately from the HIP runtime, and a DT_NEEDED entry for it
+        # would make `import torchcodec` fail outright on a machine that does not
+        # have it - taking CPU decoding down with it. We dlopen it on first use
+        # instead and fall back to CPU when it is absent, which is exactly what
+        # the CUDA build does with libnvcuvid.so. See [Loading rocDecode at
+        # runtime] in NVCUVIDRuntimeLoader.cpp. Only the headers are needed here.
+        target_link_libraries(${core_library_name} PRIVATE
+            hip::host
+        )
+        # SYSTEM, because rocparser.h uses an anonymous type inside an anonymous
+        # union, which our -Wall -Wextra -pedantic -Werror build otherwise
+        # rejects with -Wnested-anon-types.
+        target_include_directories(${core_library_name} SYSTEM PRIVATE
+            "${rocdecode_INCLUDE_DIR}"
+        )
+        target_compile_definitions(${core_library_name} PRIVATE USE_ROCM)
+        set_property(TARGET ${core_library_name} PROPERTY HIP_STANDARD 17)
     endif()
 
     # 2. Create libtorchcodec_custom_opsN.{ext}.
@@ -702,6 +790,45 @@ endfunction()
 make_torchcodec_image_library()
 make_torchcodec_pybind_library()
 make_torchcodec_heic_library()
+
+# HIP has to be enabled here rather than next to the rest of the ROCm setup in
+# make_torchcodec_libraries(). enable_language() "must be called in file scope,
+# not in a function call": it defines the language's internal variables in the
+# calling scope, so a call inside a function is discarded when the function
+# returns, and generation then fails with
+#     Error required internal CMake variable not set [...]
+#     Missing variable is: CMAKE_HIP_COMPILE_OBJECT
+# check_language() is the documented way to probe first, since enable_language's
+# OPTIONAL keyword does not actually work. Without it, a machine that sets
+# ENABLE_ROCM but has no hipcc would hard-error here instead of configuring a
+# build without ROCm support, which is how the missing-dependency path below
+# behaves.
+if(ENABLE_ROCM)
+    # HIP only became a language CMake knows how to enable in 3.21, so on an
+    # older CMake check_language(HIP) finds nothing no matter how complete the
+    # ROCm install is. Say so, instead of letting the warning below blame a
+    # missing compiler for what is a build-tool version problem.
+    if(CMAKE_VERSION VERSION_LESS 3.21)
+        message(
+            FATAL_ERROR
+            "ENABLE_ROCM requires CMake 3.21 or newer (HIP became a first-class "
+            "CMake language in 3.21), but this is CMake ${CMAKE_VERSION}."
+        )
+    endif()
+
+    include(CheckLanguage)
+    check_language(HIP)
+    if(CMAKE_HIP_COMPILER)
+        enable_language(HIP)
+    else()
+        message(
+            WARNING
+            "ENABLE_ROCM is set but CMake could not find a HIP compiler. "
+            "Skipping ROCm support. Set ROCM_PATH if CMake cannot find your ROCm install."
+        )
+        set(ENABLE_ROCM OFF)
+    endif()
+endif()
 
 if(DEFINED ENV{BUILD_AGAINST_ALL_FFMPEG_FROM_S3})
     message(

@@ -10,13 +10,10 @@
 #include <memory>
 #include <mutex>
 
-#include <cuda.h>
-
 #include "NVCUVIDRuntimeLoader.h"
 #include "NVDECCacheConfig.h"
+#include "NvcuvidCompat.h"
 #include "StableABICompat.h"
-#include "nvcuvid_include/cuviddec.h"
-#include "nvcuvid_include/nvcuvid.h"
 
 namespace facebook::torchcodec {
 

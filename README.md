@@ -193,6 +193,77 @@ default):
 pip install torchcodec --index-url=https://download.pytorch.org/whl/cpu
 ```
 
+### Installing ROCm-enabled TorchCodec
+
+TorchCodec supports hardware-accelerated video decoding on AMD GPUs with ROCm
+using [rocDecode](https://rocm.docs.amd.com/projects/rocDecode/en/latest) (via
+VCN - Video Core Next). Color conversion afterwards runs in TorchCodec's own
+kernels — the same source the CUDA build uses, compiled as HIP — so the ROCm
+and CUDA paths share their decode and conversion logic rather than
+reimplementing it.
+
+**Requirements:**
+- ROCm 10.1 or newer, which supplies rocDecode (1.8.0 or above) in its core
+  SDK. The build checks the rocDecode version.
+- AMD GPU with VCN (Video Core Next) support
+- PyTorch compiled with ROCm support
+
+**Installation:**
+
+1. Install ROCm 10.1 or newer following AMD's [ROCm installation
+   guide](https://rocm.docs.amd.com/). rocDecode is part of the ROCm core SDK,
+   so a core SDK install already satisfies the decoder dependency. If you
+   installed only base ROCm, rocDecode is available as a separate package —
+   `packaging/install_rocdecode.sh` in this repository installs it along with
+   the AMD VA-API driver that rocDecode needs at runtime.
+
+2. Install PyTorch with ROCm support, matching the ROCm version you installed:
+
+   ```bash
+   pip install torch --index-url https://download.pytorch.org/whl/rocm<version>
+   ```
+
+   Refer to the "Install PyTorch" section in the [ROCm AI Ecosystem
+   documentation](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/index.html)
+   for the latest instructions and the available index URLs.
+
+3. Install TorchCodec. ROCm-enabled wheels are not published yet, so build from
+   source with `ENABLE_ROCM=1` (see CONTRIBUTING.md for the general build
+   setup):
+
+   ```bash
+   git clone https://github.com/pytorch/torchcodec.git
+   cd torchcodec
+   # ROCM_PATH is required: the build uses it to find HIP and rocDecode.
+   # /opt/rocm is the default system install; inside a ROCm venv it is the
+   # _rocm_sdk_devel directory of that environment instead.
+   export ROCM_PATH=/opt/rocm
+   ENABLE_ROCM=1 pip install -e ".[dev]" --no-build-isolation -vv
+   ```
+
+   > **Note:** If HIP or rocDecode cannot be found, the build prints a warning,
+   > turns ROCm support back off and produces a **CPU-only** package rather than
+   > failing. Watch the configure output for `Skipping ROCm support`, and use
+   > the verification step below to confirm what you actually got.
+
+**Verification:**
+
+To verify that your installation supports ROCm decoding:
+
+```python
+import torch
+from torchcodec.decoders import VideoDecoder
+
+print(torch.cuda.is_available())  # Should return True for ROCm
+decoder = VideoDecoder("video.mp4", device="cuda")
+print(decoder.cpu_fallback)  # Check if rocDecode is being used
+```
+
+For more details and examples, see the [GPU decoding
+example](https://meta-pytorch.org/torchcodec/stable/generated_examples/basic_cuda_example.html)
+— it applies to AMD GPUs as written, since `device="cuda"` is the AMD GPU under
+a ROCm build of PyTorch.
+
 ### XPU support
 
 Intel GPUs (XPU) support requires a stand-alone plugin for TorchCodec:

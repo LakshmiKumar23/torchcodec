@@ -6,12 +6,12 @@
 
 #pragma once
 
-#include <cuda_runtime.h>
 #include <cstdint>
 #include <optional>
 
 #include "FFMPEGCommon.h"
 #include "Frame.h"
+#include "GpuCompat.h"
 
 namespace facebook::torchcodec {
 

@@ -20,12 +20,10 @@
 #include "NVDECCache.h"
 
 #include "NVCUVIDRuntimeLoader.h"
+#include "NvcuvidCompat.h"
 #include "color_conversion.h"
-#include "nvcuvid_include/cuviddec.h"
-#include "nvcuvid_include/nvcuvid.h"
 
 extern "C" {
-#include <libavutil/hwcontext_cuda.h>
 #include <libavutil/pixdesc.h>
 }
 
@@ -75,18 +73,36 @@ static DecoderCapsCache& get_decoder_caps_cache() {
 
 // NVDEC's output surface formats come in a 4:2:0 and a 4:4:4 flavour, each with
 // an 8-bit and a 16-bit variant. We decode on the surface that respects the
-// source chroma, but we don't respect the source bit depth and instead try to
-// honor the user's requested output dtype:
-// - if the user wants uint8 output, we try to decode on a uint8 surface,
-//   including for >8bit sources. It's not always supported by NVDEC, so the
-//   caller must fallback to the >8bit surface in such case.
-// - similarly if the user wants float32 output, we try to decode on a >8bit
-//   surface, including for 8bit sources. The caller must handle a similar
-//   fallback.
+// source chroma and the source bit depth, and beyond that try to honor the
+// user's requested output dtype:
+// - if the user wants uint8 output from an 8bit source, we decode on a uint8
+//   surface. It's not always supported, so the caller must fallback to the
+//   >8bit surface in such case.
+// - if the user wants float32 output, we try to decode on a >8bit surface,
+//   including for 8bit sources. The caller must handle a similar fallback.
+//
+// What we never do is ask for an 8-bit surface for a >8bit source. A decoder
+// that accepts such a request honors it by truncating in hardware, and we'd
+// then be color-converting samples that had already lost their low bits. When
+// uint8 output is what was asked for we do have to reach 8 bits eventually,
+// but that belongs after color conversion, in code both backends share -
+// exactly as upload_cpu_frame_to_gpu() already argues for the CPU path.
+//
+// This is not academic. rocDecode reports a bit-depth-independent format mask:
+// bit_depth_minus_8 only gates is_supported, while output_format_mask is
+// copied from the VA-API surface attributes for the whole context, which list
+// NV12 alongside P010. So a 10-bit HEVC stream was being decoded onto NV12 and
+// truncated by VCN. Asking for the source's depth makes the choice follow the
+// content rather than whatever each vendor happens to advertise, which is what
+// keeps the two backends on the same path.
+//
+// Note this does not change the output dtype: a uint8 request still yields a
+// uint8 tensor, the narrowing just happens in our kernel now.
 cudaVideoSurfaceFormat get_preferred_surface_format(
     cudaVideoChromaFormat chroma_format,
-    OutputDtype output_dtype) {
-  bool want_uint8 = output_dtype == OutputDtype::UINT8;
+    OutputDtype output_dtype,
+    unsigned int bit_depth_minus8) {
+  bool want_uint8 = output_dtype == OutputDtype::UINT8 && bit_depth_minus8 == 0;
   if (chroma_format == cudaVideoChromaFormat_444) {
     return want_uint8 ? cudaVideoSurfaceFormat_YUV444
                       : cudaVideoSurfaceFormat_YUV444_16Bit;
@@ -134,11 +150,22 @@ bool is_expected_pix_fmt_from_nvdec(AVPixelFormat pix_fmt) {
       pix_fmt == AV_PIX_FMT_YUV444P || pix_fmt == AV_PIX_FMT_YUV444P16LE;
 }
 
+#if defined(USE_ROCM)
+// The ROCm build compiles this file too, but does not register this class: the
+// (kCUDA, "default") key belongs to the ROCm interface, which derives from this
+// one and registers itself. Claiming the key here as well would trip the
+// duplicate-key STD_TORCH_CHECK in register_device_interface() during static
+// initialization, i.e. at `import torchcodec`. The flag is still defined and
+// true so that the constructor's assertion below keeps its meaning: this class
+// is reachable, just not as an interface in its own right.
+static bool g_cuda_nvdec = true;
+#else
 static bool g_cuda_nvdec = register_device_interface(
     DeviceInterfaceKey(kStableCUDA, /*variant=*/"default"),
     [](const StableDevice& device) {
       return new BetaCudaDeviceInterface(device);
     });
+#endif
 
 static int CUDAAPI
 pfn_sequence_callback(void* p_user_data, CUVIDEOFORMAT* video_format) {
@@ -383,8 +410,8 @@ std::optional<cudaVideoSurfaceFormat> get_nvdec_surface_format(
     return std::nullopt;
   }
 
-  auto preferred_format =
-      get_preferred_surface_format(chroma_format.value(), output_dtype);
+  auto preferred_format = get_preferred_surface_format(
+      chroma_format.value(), output_dtype, bit_depth_minus8);
 
   auto is_supported = [&](cudaVideoSurfaceFormat format) {
     return ((caps.nOutputFormatMask >> format) & 1) != 0;
@@ -395,12 +422,18 @@ std::optional<cudaVideoSurfaceFormat> get_nvdec_surface_format(
   }
 
   // The preferred_format heuristic tries to take a shortcut that might cause us
-  // to miss valid formats. We fallabck here:
-  // if source is 8bit we can try the 8bit surface.
+  // to miss valid formats. We fall back here:
+  // if surface is 16bit we can try the 8bit surface.
   // if surface is 8bit we can try the 16bit surface.
+  //
+  // For a >8bit source the narrower surface means the decoder truncates in
+  // hardware, which is what preferring the source's depth above exists to
+  // avoid. We still take it rather than return nullopt, because the
+  // alternative is giving up on hardware decode altogether: losing the low
+  // bits beats falling all the way back to the CPU. It only happens on
+  // hardware that offers no >8bit surface at all.
 
-  bool source_is_8_bits = bit_depth_minus8 == 0;
-  if (is_16bit_surface_format(preferred_format) && source_is_8_bits) {
+  if (is_16bit_surface_format(preferred_format)) {
     auto narrower = preferred_format == cudaVideoSurfaceFormat_YUV444_16Bit
         ? cudaVideoSurfaceFormat_YUV444
         : cudaVideoSurfaceFormat_NV12;
@@ -451,7 +484,10 @@ class CudaContextGuard {
   // in a different thread that doesn't have the context.
  public:
   explicit CudaContextGuard(int device_index) : device_guard_(device_index) {
-    cudaFree(nullptr);
+    // The status is intentionally dropped: this call exists only for its side
+    // effect of binding a context. The cast is a no-op on CUDA and silences
+    // hipError_t's [[nodiscard]] on ROCm.
+    (void)cudaFree(nullptr);
   }
 
  private:
@@ -794,10 +830,10 @@ int BetaCudaDeviceInterface::send_packet(const AVPacket& packet) {
   cuvid_packet.payload = packet_to_send.data;
   cuvid_packet.payload_size = packet_to_send.size;
   cuvid_packet.flags = CUVID_PKT_TIMESTAMP;
-  cuvid_packet.timestamp = packet_to_send.pts;
+  set_timestamp(cuvid_packet, packet_to_send.pts);
 
   if (packet_to_send.flags & AV_PKT_FLAG_DISCARD) {
-    discarded_timestamps_.insert(cuvid_packet.timestamp);
+    discarded_timestamps_.insert(get_timestamp(cuvid_packet));
   }
 
   if (track_pts_ourselves_) {
@@ -885,14 +921,14 @@ int BetaCudaDeviceInterface::frame_ready_for_decoding(
   STD_TORCH_CHECK(decoder_, "Decoder not initialized before picture decode");
   // See the comment about surfaces in stream_property_change().
   for (const auto& queued_frame : ready_frames_) {
-    if (queued_frame.picture_index == pic_params->CurrPicIdx &&
-        discarded_timestamps_.count(queued_frame.timestamp) == 0) {
+    if (queued_frame.picture_index == get_curr_pic_idx(*pic_params) &&
+        discarded_timestamps_.count(get_timestamp(queued_frame)) == 0) {
       TC_LOG(
           "NVDEC is decoding into surface %d, which still holds the frame with "
           "pts %lld that hasn't been returned yet. That frame will be "
           "returned with the wrong content.",
-          pic_params->CurrPicIdx,
-          static_cast<long long>(queued_frame.timestamp));
+          get_curr_pic_idx(*pic_params),
+          static_cast<long long>(get_timestamp(queued_frame)));
     }
   }
 
@@ -914,7 +950,7 @@ int BetaCudaDeviceInterface::frame_ready_for_decoding(
 int BetaCudaDeviceInterface::frame_ready_in_display_order(
     CUVIDPARSERDISPINFO* disp_info) {
   if (track_pts_ourselves_ && !pending_pts_.empty()) {
-    disp_info->timestamp = pending_pts_.front();
+    set_timestamp(*disp_info, pending_pts_.front());
     pending_pts_.pop();
   }
   ready_frames_.push_back(*disp_info);
@@ -931,7 +967,8 @@ int BetaCudaDeviceInterface::receive_frame(UniqueAVFrame& av_frame) {
   // Drop those packets that were marked as discard. We only wanted to decode
   // those, not to return them.
   while (!ready_frames_.empty() &&
-         discarded_timestamps_.erase(ready_frames_.front().timestamp) > 0) {
+         discarded_timestamps_.erase(get_timestamp(ready_frames_.front())) >
+             0) {
     ready_frames_.pop_front();
   }
 
@@ -944,21 +981,11 @@ int BetaCudaDeviceInterface::receive_frame(UniqueAVFrame& av_frame) {
   CUVIDPARSERDISPINFO disp_info = ready_frames_.front();
   ready_frames_.pop_front();
 
-  CUVIDPROCPARAMS proc_params = {};
-  proc_params.progressive_frame = disp_info.progressive_frame;
-  proc_params.top_field_first = disp_info.top_field_first;
-  proc_params.unpaired_field = disp_info.repeat_first_field < 0;
   // We set the NVDEC stream to the current stream, and remember it: consumers
   // of the mapped surface run later and possibly on a different stream, so they
   // need to know which stream produces the surface's content in order to wait
   // on it.
-  // Re types: we get a cudaStream_t from PyTorch but it's interchangeable with
-  // CUstream
   nvdec_output_stream_ = get_current_cuda_stream(device_.index());
-  proc_params.output_stream = reinterpret_cast<CUstream>(nvdec_output_stream_);
-
-  CUdeviceptr frame_ptr = 0;
-  unsigned int pitch = 0;
 
   // We know the frame we want was sent to the hardware decoder, but now we need
   // to "map" it to an "output surface" before we can use its data. This is a
@@ -980,20 +1007,16 @@ int BetaCudaDeviceInterface::receive_frame(UniqueAVFrame& av_frame) {
   // Those reads are asynchronous, so we must wait on them to finish.
   surface_read_done_.make_stream_wait(nvdec_output_stream_);
   unmap_previous_frame();
-  CUresult result = cuvidMapVideoFrame(
-      *decoder_.get(),
-      disp_info.picture_index,
-      &frame_ptr,
-      &pitch,
-      &proc_params);
-  if (result != CUDA_SUCCESS) {
-    return AVERROR_EXTERNAL;
+  MappedSurface surface;
+  int status = map_frame(disp_info, nvdec_output_stream_, surface);
+  if (status != AVSUCCESS) {
+    return status;
   }
-  previously_mapped_frame_ = frame_ptr;
+  previously_mapped_frame_ = surface.planes[0];
 
   nvdec_surface_ready_.record(nvdec_output_stream_);
 
-  av_frame = convert_cuda_frame_to_av_frame(frame_ptr, pitch, disp_info);
+  av_frame = convert_cuda_frame_to_av_frame(surface, disp_info);
 
   return AVSUCCESS;
 }
@@ -1004,6 +1027,43 @@ void BetaCudaDeviceInterface::record_surface_read(cudaStream_t stream) {
   // This sets the surface_read_done_ event that must be waited upon before
   // mapping a new frame on the surface.
   surface_read_done_.record(stream);
+}
+
+int BetaCudaDeviceInterface::map_frame(
+    const CUVIDPARSERDISPINFO& disp_info,
+    cudaStream_t stream,
+    MappedSurface& surface) {
+  CUVIDPROCPARAMS proc_params = {};
+  proc_params.progressive_frame = disp_info.progressive_frame;
+  proc_params.top_field_first = disp_info.top_field_first;
+  proc_params.unpaired_field = disp_info.repeat_first_field < 0;
+  // Re types: we get a cudaStream_t from PyTorch but it's interchangeable with
+  // CUstream.
+  proc_params.output_stream = reinterpret_cast<CUstream>(stream);
+
+  CUdeviceptr frame_ptr = 0;
+  unsigned int pitch = 0;
+  CUresult result = cuvidMapVideoFrame(
+      *decoder_.get(),
+      disp_info.picture_index,
+      &frame_ptr,
+      &pitch,
+      &proc_params);
+  if (result != CUDA_SUCCESS) {
+    return AVERROR_EXTERNAL;
+  }
+
+  // NVDEC stacks the planes of the coded frame in a single allocation, all with
+  // the same pitch, so consecutive planes start plane_stride bytes apart.
+  // NVIDIA's own NvDecoder addresses the chroma plane the same way:
+  // dpSrcFrame + srcPitch * ((surface_height + 1) & ~1).
+  unsigned int plane_stride = pitch * plane_rows();
+  int num_planes = is_444_surface_format(surface_format_) ? 3 : 2;
+  for (int plane = 0; plane < num_planes; ++plane) {
+    surface.planes[plane] = frame_ptr + (plane_stride * plane);
+    surface.pitch[plane] = pitch;
+  }
+  return AVSUCCESS;
 }
 
 void BetaCudaDeviceInterface::unmap_previous_frame() {
@@ -1019,8 +1079,9 @@ void BetaCudaDeviceInterface::unmap_previous_frame() {
 
 // Where the display area starts within a plane of the surface, in bytes. See
 // Note: [NVDEC surface dimensions and cropping].
-BetaCudaDeviceInterface::CropOffsets BetaCudaDeviceInterface::get_crop_offsets(
-    unsigned int pitch) const {
+unsigned int BetaCudaDeviceInterface::crop_offset(
+    int plane,
+    unsigned int plane_pitch) const {
   int crop_left = video_format_.display_area.left;
   int crop_top = video_format_.display_area.top;
   bool is_444 = is_444_surface_format(surface_format_);
@@ -1032,18 +1093,19 @@ BetaCudaDeviceInterface::CropOffsets BetaCudaDeviceInterface::get_crop_offsets(
       crop_top,
       "), this is unexpected, please report.");
 
+  // A subsampled surface carries one chroma row per two luma rows, so the same
+  // crop is half as many rows into a chroma plane. Horizontally it is the same
+  // byte offset either way: NV12 halves the column count but carries two
+  // samples per column.
   int bytes_per_sample = is_16bit_surface_format(surface_format_) ? 2 : 1;
-  unsigned int luma = crop_top * pitch + crop_left * bytes_per_sample;
-  unsigned int chroma =
-      is_444 ? luma : (crop_top / 2) * pitch + crop_left * bytes_per_sample;
-  return {luma, chroma};
+  int crop_rows = (plane == 0 || is_444) ? crop_top : crop_top / 2;
+  return crop_rows * plane_pitch + crop_left * bytes_per_sample;
 }
 
 UniqueAVFrame BetaCudaDeviceInterface::convert_cuda_frame_to_av_frame(
-    CUdeviceptr frame_ptr,
-    unsigned int pitch,
+    const MappedSurface& surface,
     const CUVIDPARSERDISPINFO& disp_info) {
-  STD_TORCH_CHECK(frame_ptr != 0, "Invalid CUDA frame pointer");
+  STD_TORCH_CHECK(surface.planes[0] != 0, "Invalid CUDA frame pointer");
 
   // The surface we're given is the entire coded frame; the frame we hand out is
   // its display area, which we crop to below by offsetting the planes. See
@@ -1055,7 +1117,8 @@ UniqueAVFrame BetaCudaDeviceInterface::convert_cuda_frame_to_av_frame(
 
   STD_TORCH_CHECK(width > 0 && height > 0, "Invalid frame dimensions");
   STD_TORCH_CHECK(
-      pitch >= static_cast<unsigned int>(width), "Pitch must be >= width");
+      surface.pitch[0] >= static_cast<unsigned int>(width),
+      "Pitch must be >= width");
 
   UniqueAVFrame av_frame(av_frame_alloc());
   STD_TORCH_CHECK(av_frame.get() != nullptr, "Failed to allocate AVFrame");
@@ -1065,7 +1128,7 @@ UniqueAVFrame BetaCudaDeviceInterface::convert_cuda_frame_to_av_frame(
   av_frame->format = surface_to_pix_fmt(
       surface_format_,
       static_cast<int>(video_format_.bit_depth_luma_minus8) + 8);
-  av_frame->pts = disp_info.timestamp;
+  av_frame->pts = get_timestamp(disp_info);
 
   // TODONVDEC P2: We compute the duration based on average frame rate info, so
   // so if the video has variable frame rate, the durations may be off. We
@@ -1086,23 +1149,43 @@ UniqueAVFrame BetaCudaDeviceInterface::convert_cuda_frame_to_av_frame(
   // corresponding indices in the FFmpeg enum for colorspace conversion
   // (ff_yuv2rgb_coeffs):
   // https://ffmpeg.org/doxygen/trunk/yuv2rgb_8c_source.html#l00047
-  switch (video_format_.video_signal_description.matrix_coefficients) {
-    case 1:
-      av_frame->colorspace = AVCOL_SPC_BT709;
-      break;
-    case 6:
-      av_frame->colorspace = AVCOL_SPC_SMPTE170M; // BT.601
-      break;
-    case 9:
-      av_frame->colorspace = AVCOL_SPC_BT2020_NCL;
-      break;
-    case 10:
-      av_frame->colorspace = AVCOL_SPC_BT2020_CL;
-      break;
-    default:
-      // Default to BT.601
-      av_frame->colorspace = AVCOL_SPC_SMPTE170M;
-      break;
+  //
+  // A hardware parser does not always report this, though, and when it does
+  // not we can do better than the default below. Codes 0 and 2 both amount to
+  // "nothing was signalled", and in that case FFmpeg's own view of the stream
+  // is strictly more informative - it is also what the CPU decoder uses, so
+  // deferring to it is what keeps the two in agreement. The case that forced
+  // this: rocDecode's AV1 parser zeroes the whole video_signal_description and
+  // never fills it in (av1_parser.cpp), so every AV1 stream claims
+  // "unspecified" no matter what its sequence header actually said, and a
+  // BT.709 video would otherwise be converted with BT.601 coefficients.
+  int matrix_coefficients =
+      video_format_.video_signal_description.matrix_coefficients;
+  if ((matrix_coefficients == 0 || matrix_coefficients == 2) &&
+      codec_context_ != nullptr &&
+      codec_context_->colorspace != AVCOL_SPC_UNSPECIFIED) {
+    // Passed through as-is: get_luma_coefficients() falls back to BT.601 for
+    // anything it does not recognise, exactly as it does below.
+    av_frame->colorspace = codec_context_->colorspace;
+  } else {
+    switch (matrix_coefficients) {
+      case 1:
+        av_frame->colorspace = AVCOL_SPC_BT709;
+        break;
+      case 6:
+        av_frame->colorspace = AVCOL_SPC_SMPTE170M; // BT.601
+        break;
+      case 9:
+        av_frame->colorspace = AVCOL_SPC_BT2020_NCL;
+        break;
+      case 10:
+        av_frame->colorspace = AVCOL_SPC_BT2020_CL;
+        break;
+      default:
+        // Default to BT.601
+        av_frame->colorspace = AVCOL_SPC_SMPTE170M;
+        break;
+    }
   }
 
   av_frame->color_range =
@@ -1119,33 +1202,28 @@ UniqueAVFrame BetaCudaDeviceInterface::convert_cuda_frame_to_av_frame(
   av_frame->color_trc = static_cast<AVColorTransferCharacteristic>(
       video_format_.video_signal_description.transfer_characteristics);
 
-  // NVDEC stacks the planes of the coded frame in a single allocation, all with
-  // the same pitch, so consecutive planes start plane_stride bytes apart.
-  // NVIDIA's own NvDecoder addresses the chroma plane the same way:
-  // dpSrcFrame + srcPitch * ((surface_height + 1) & ~1).
-  unsigned int plane_stride = pitch * round_up_to_even(surface_height());
-  bool is_444 = is_444_surface_format(surface_format_);
-
-  CropOffsets crop_offsets = get_crop_offsets(pitch);
-  auto plane = [&](unsigned int index, unsigned int crop_offset) {
-    return reinterpret_cast<uint8_t*>(
-        frame_ptr + (plane_stride * index) + crop_offset);
-  };
-
-  av_frame->data[0] = plane(0, crop_offsets.luma);
-  av_frame->data[1] = plane(1, crop_offsets.chroma);
-  av_frame->data[2] = is_444 ? plane(2, crop_offsets.chroma) : nullptr;
-  av_frame->data[3] = nullptr;
-  STD_TORCH_CHECK(
-      pitch <= static_cast<unsigned int>(std::numeric_limits<int>::max()),
-      "NVDEC returned a pitch of ",
-      pitch,
-      " bytes, which doesn't fit in an AVFrame line size. This should never "
-      "happen, please report.");
-  av_frame->linesize[0] = static_cast<int>(pitch);
-  av_frame->linesize[1] = static_cast<int>(pitch);
-  av_frame->linesize[2] = is_444 ? static_cast<int>(pitch) : 0;
-  av_frame->linesize[3] = 0;
+  // The decoder told us where each plane is; all that's left is to skip into
+  // the display area. See Note: [The one hardware-decoder seam] for why the
+  // planes arrive described individually rather than as one pointer.
+  int num_planes = is_444_surface_format(surface_format_) ? 3 : 2;
+  for (int i = 0; i < num_planes; ++i) {
+    STD_TORCH_CHECK(
+        surface.pitch[i] <=
+            static_cast<unsigned int>(std::numeric_limits<int>::max()),
+        "The decoder returned a pitch of ",
+        surface.pitch[i],
+        " bytes for plane ",
+        i,
+        ", which doesn't fit in an AVFrame line size. This should never "
+        "happen, please report.");
+    av_frame->data[i] = reinterpret_cast<uint8_t*>(
+        surface.planes[i] + crop_offset(i, surface.pitch[i]));
+    av_frame->linesize[i] = static_cast<int>(surface.pitch[i]);
+  }
+  for (int i = num_planes; i < 4; ++i) {
+    av_frame->data[i] = nullptr;
+    av_frame->linesize[i] = 0;
+  }
 
   return av_frame;
 }
@@ -1206,56 +1284,68 @@ std::optional<torch::stable::Tensor> BetaCudaDeviceInterface::get_frame_storage(
 torch::stable::Tensor BetaCudaDeviceInterface::copy_nvdec_surface(
     UniqueAVFrame& av_frame,
     cudaStream_t current_stream) {
-  // The amount of bytes an NV12 image takes is:
+  // A plane is pitch * rows bytes, not width * height: the pitch accounts for
+  // both the row padding and the data size (uint8 vs uint16), and plane_rows()
+  // accounts for the vertical padding. A subsampled surface carries one chroma
+  // row per two luma rows, so an NV12 image comes to
+  //
   // num_bytes =  len(Y) + len(UV)
   //           = num_pixels + num_pixels / 2
   //           = num_pixels * 3 / 2
   //
-  // where num_pixels = pitch * num_luma_plane_rows, not width * height: the
-  // pitch accounts for both the row padding and the data size (uint8 vs
-  // uint16), and NVDEC rounds the Y plane's row count up to even. A 4:4:4
-  // surface has two full-size chroma planes instead of one half-height one, so
-  // it's num_pixels * 3.
-  int64_t num_luma_plane_rows =
-      static_cast<int64_t>(round_up_to_even(surface_height()));
-  int64_t pitch = static_cast<int64_t>(av_frame->linesize[0]);
+  // while a 4:4:4 one has two full-size chroma planes instead of one
+  // half-height one, so it's num_pixels * 3. The planes are laid out back to
+  // back in that order within a single allocation.
   bool is_444 = is_444_surface_format(surface_format_);
-  int64_t num_bytes = is_444 ? pitch * num_luma_plane_rows * 3
-                             : pitch * num_luma_plane_rows * 3 / 2;
+  int num_planes = is_444 ? 3 : 2;
 
-  auto* surface_base = av_frame->data[0] -
-      get_crop_offsets(static_cast<unsigned int>(pitch)).luma;
+  int64_t plane_bytes[3] = {0, 0, 0};
+  int64_t plane_offset[3] = {0, 0, 0};
+  int64_t num_bytes = 0;
+  for (int i = 0; i < num_planes; ++i) {
+    int64_t num_plane_rows = static_cast<int64_t>(plane_rows());
+    if (i > 0 && !is_444) {
+      num_plane_rows /= 2;
+    }
+    plane_bytes[i] =
+        static_cast<int64_t>(av_frame->linesize[i]) * num_plane_rows;
+    plane_offset[i] = num_bytes;
+    num_bytes += plane_bytes[i];
+  }
 
   auto storage =
       torch::stable::empty({num_bytes}, kStableUInt8, std::nullopt, device_);
+  auto* storage_base = static_cast<uint8_t*>(storage.mutable_data_ptr());
 
   // The surface's content is produced by the mapping post-processing that
   // receive_frame() enqueued on nvdec_output_stream_, which isn't necessarily
   // the stream we're copying on.
   nvdec_surface_ready_.make_stream_wait(current_stream);
 
-  cudaError_t err = cudaMemcpyAsync(
-      storage.mutable_data_ptr(),
-      surface_base,
-      static_cast<size_t>(num_bytes),
-      cudaMemcpyDeviceToDevice,
-      current_stream);
-  STD_TORCH_CHECK(
-      err == cudaSuccess,
-      "Failed to copy NVDEC surface: ",
-      cudaGetErrorString(err));
-
-  // The copy is async, so the next mapping must be ordered after it.
-  record_surface_read(current_stream);
-
-  // Re-point the planes into the copy, preserving where they were within the
-  // surface: those offsets encode both the plane layout and the display area
-  // crop.
-  auto* storage_base = static_cast<uint8_t*>(storage.mutable_data_ptr());
-  int num_planes = is_444 ? 3 : 2;
+  // One copy per plane: the decoder described the planes individually, so we
+  // read each from its own start rather than running off the end of one into
+  // the next. See Note: [The one hardware-decoder seam].
   for (int i = 0; i < num_planes; ++i) {
-    av_frame->data[i] = storage_base + (av_frame->data[i] - surface_base);
+    unsigned int offset_in_plane =
+        crop_offset(i, static_cast<unsigned int>(av_frame->linesize[i]));
+    cudaError_t err = cudaMemcpyAsync(
+        storage_base + plane_offset[i],
+        av_frame->data[i] - offset_in_plane,
+        static_cast<size_t>(plane_bytes[i]),
+        cudaMemcpyDeviceToDevice,
+        current_stream);
+    STD_TORCH_CHECK(
+        err == cudaSuccess,
+        "Failed to copy NVDEC surface: ",
+        cudaGetErrorString(err));
+
+    // Re-point the plane into the copy, keeping the display area the same
+    // number of rows into it as it was in the surface.
+    av_frame->data[i] = storage_base + plane_offset[i] + offset_in_plane;
   }
+
+  // The copies are async, so the next mapping must be ordered after them.
+  record_surface_read(current_stream);
 
   return storage;
 }
@@ -1620,3 +1710,170 @@ std::string BetaCudaDeviceInterface::get_details() {
 }
 
 } // namespace facebook::torchcodec
+
+#if defined(USE_ROCM)
+
+/* clang-format off */
+// Note: [Implementing the NVCUVID entry points on top of rocDecode]
+//
+// Everything above this line is the NVDEC implementation, unchanged and
+// untouched by the ROCm port. It calls nine NVCUVID entry points. On CUDA
+// those resolve to the forwarders in NVCUVIDRuntimeLoader.cpp, which dlopen
+// libnvcuvid.so; on ROCm they resolve to the definitions below, which call
+// rocDecode. The rocDec* functions called below are themselves forwarders in
+// that same file (see [Loading rocDecode at runtime]): neither build links its
+// vendor decode library, so on either platform a missing driver library is a
+// CPU fallback rather than an `import torchcodec` failure.
+//
+// Seven of the nine are genuine 1:1 forwards - AMD modelled the API closely
+// enough that the only work is copying NVIDIA-named fields into snake_case
+// ones (see [The four carrier structs] in NvcuvidCompat.h). The two
+// exceptions:
+//
+// - cuvidMapVideoFrame is a stub that fails. rocDecGetVideoFrame returns
+//   three plane pointers and three pitches with no promise that the planes
+//   are contiguous or share a pitch, where NVCUVID returns one of each and
+//   lets the caller derive the chroma planes arithmetically. Forwarding it
+//   would mean discarding two thirds of the output and assuming a layout AMD
+//   never guaranteed, and the failure mode is silently wrong chroma rather
+//   than a crash - which would defeat the whole point of sharing the color
+//   conversion kernels. BetaRocmDeviceInterface overrides map_frame()
+//   instead, so this is never called; it exists so the base class body still
+//   links.
+//
+// - cuvidUnmapVideoFrame succeeds without doing anything. rocDecode has no
+//   unmap entry point at all: a surface is released when the decoder is
+//   asked for the next one. That is why unmap_previous_frame() did not need
+//   to become virtual.
+//
+// The remaining asymmetry is the device. NVCUVID takes it from the current
+// CUDA context; rocDecode wants it named in each create/query call.
+/* clang-format on */
+
+namespace {
+
+uint8_t current_rocm_device_id() {
+  int device = 0;
+  cudaError_t err = cudaGetDevice(&device);
+  STD_TORCH_CHECK(
+      err == cudaSuccess,
+      "Failed to query the current HIP device: ",
+      cudaGetErrorString(err));
+  return static_cast<uint8_t>(device);
+}
+
+} // namespace
+
+CUresult cuvidGetDecoderCaps(CUVIDDECODECAPS* caps) {
+  RocdecDecodeCaps rocdec_caps = {};
+  rocdec_caps.device_id = current_rocm_device_id();
+  rocdec_caps.codec_type = caps->eCodecType;
+  rocdec_caps.chroma_format = caps->eChromaFormat;
+  rocdec_caps.bit_depth_minus_8 = caps->nBitDepthMinus8;
+
+  CUresult result = rocDecGetDecoderCaps(&rocdec_caps);
+  if (result != CUDA_SUCCESS) {
+    return result;
+  }
+
+  caps->bIsSupported = rocdec_caps.is_supported;
+  caps->nOutputFormatMask = rocdec_caps.output_format_mask;
+  caps->nMaxWidth = rocdec_caps.max_width;
+  caps->nMaxHeight = rocdec_caps.max_height;
+  caps->nMinWidth = rocdec_caps.min_width;
+  caps->nMinHeight = rocdec_caps.min_height;
+
+  // rocDecode publishes no macroblock-count cap. Report the largest count the
+  // dimension limits just above already permit, so the nMaxMBCount check in
+  // the shared code becomes redundant instead of rejecting frames AMD would
+  // decode happily. Rounding up matters: 1920x1080 is 8100 macroblocks, which
+  // a (max_width / 16) * (max_height / 16) form would understate as 8040.
+  caps->nMaxMBCount = static_cast<unsigned int>(
+      (static_cast<uint64_t>(caps->nMaxWidth) * caps->nMaxHeight + 255) / 256);
+  return result;
+}
+
+CUresult cuvidCreateDecoder(
+    CUvideodecoder* decoder,
+    CUVIDDECODECREATEINFO* create_info) {
+  RocDecoderCreateInfo info = {};
+  info.device_id = current_rocm_device_id();
+  info.width = static_cast<uint32_t>(create_info->ulWidth);
+  info.height = static_cast<uint32_t>(create_info->ulHeight);
+  info.num_decode_surfaces =
+      static_cast<uint32_t>(create_info->ulNumDecodeSurfaces);
+  info.codec_type = create_info->CodecType;
+  info.chroma_format = create_info->ChromaFormat;
+  info.bit_depth_minus_8 = static_cast<uint32_t>(create_info->bitDepthMinus8);
+  info.output_format = create_info->OutputFormat;
+  info.max_width = static_cast<uint32_t>(create_info->ulMaxWidth);
+  info.max_height = static_cast<uint32_t>(create_info->ulMaxHeight);
+  info.target_width = static_cast<uint32_t>(create_info->ulTargetWidth);
+  info.target_height = static_cast<uint32_t>(create_info->ulTargetHeight);
+  info.num_output_surfaces =
+      static_cast<uint32_t>(create_info->ulNumOutputSurfaces);
+  info.display_rect.left = create_info->display_area.left;
+  info.display_rect.top = create_info->display_area.top;
+  info.display_rect.right = create_info->display_area.right;
+  info.display_rect.bottom = create_info->display_area.bottom;
+  // create_info->ulCreationFlags is always cudaVideoCreate_Default and has no
+  // rocDecode counterpart. intra_decode_only and target_rect stay zeroed, as
+  // they are on the NVDEC side.
+  return rocDecCreateDecoder(decoder, &info);
+}
+
+CUresult cuvidDestroyDecoder(CUvideodecoder decoder) {
+  return rocDecDestroyDecoder(decoder);
+}
+
+CUresult cuvidCreateVideoParser(
+    CUvideoparser* parser,
+    CUVIDPARSERPARAMS* parser_params) {
+  RocdecParserParams params = {};
+  params.codec_type = parser_params->CodecType;
+  params.max_num_decode_surfaces = parser_params->ulMaxNumDecodeSurfaces;
+  params.max_display_delay = parser_params->ulMaxDisplayDelay;
+  params.user_data = parser_params->pUserData;
+  // These four types are rocparser.h's own, and once CUVIDEOFORMAT and friends
+  // are aliased they have the same signatures as NVCUVID's. The callbacks in
+  // BetaCudaDeviceInterface need no adaptation.
+  params.pfn_sequence_callback = parser_params->pfnSequenceCallback;
+  params.pfn_decode_picture = parser_params->pfnDecodePicture;
+  params.pfn_display_picture = parser_params->pfnDisplayPicture;
+  params.ext_video_info = parser_params->pExtVideoInfo;
+  return rocDecCreateVideoParser(parser, &params);
+}
+
+CUresult cuvidDestroyVideoParser(CUvideoparser parser) {
+  return rocDecDestroyVideoParser(parser);
+}
+
+CUresult cuvidParseVideoData(
+    CUvideoparser parser,
+    CUVIDSOURCEDATAPACKET* packet) {
+  return rocDecParseVideoData(parser, packet);
+}
+
+CUresult cuvidDecodePicture(
+    CUvideodecoder decoder,
+    CUVIDPICPARAMS* pic_params) {
+  return rocDecDecodeFrame(decoder, pic_params);
+}
+
+// Never called: BetaRocmDeviceInterface overrides map_frame(). See the note
+// above for why forwarding this to rocDecGetVideoFrame would be wrong.
+CUresult cuvidMapVideoFrame(
+    CUvideodecoder,
+    int,
+    CUdeviceptr*,
+    unsigned int*,
+    CUVIDPROCPARAMS*) {
+  return ROCDEC_NOT_IMPLEMENTED;
+}
+
+// rocDecode releases the previous surface itself; there is nothing to unmap.
+CUresult cuvidUnmapVideoFrame(CUvideodecoder, CUdeviceptr) {
+  return CUDA_SUCCESS;
+}
+
+#endif // USE_ROCM

@@ -20,6 +20,7 @@
 #include "DeviceInterface.h"
 #include "FFMPEGCommon.h"
 #include "NVDECCache.h"
+#include "NvcuvidCompat.h"
 #include "Transform.h"
 #include "color_conversion.h"
 
@@ -27,12 +28,10 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
-#include "nvcuvid_include/cuviddec.h"
-#include "nvcuvid_include/nvcuvid.h"
 
 namespace facebook::torchcodec {
 // The buffer a frame owns its samples in, hung off the AVFrame as opaque data.
@@ -83,11 +82,64 @@ class BetaCudaDeviceInterface : public DeviceInterface {
 
   std::string get_details() override;
 
- private:
-  enum class Mode { Uninitialized, DecoderOnly, ColorConverterOnly, Both };
-  Mode mode() const;
+ protected:
+  /* clang-format off */
+  // Note: [The one hardware-decoder seam]
+  //
+  // BetaRocmDeviceInterface will derive from this class and decode with
+  // rocDecode instead of NVDEC. Of the nine NVCUVID entry points this class
+  // calls, eight have a 1:1 rocDecode counterpart taking the same arguments in
+  // the same order, so the ROCm build will satisfy them with thin forwarders
+  // rather than by overriding anything - see Note: [Compiling
+  // BetaCudaDeviceInterface for both NVDEC and rocDecode] in NvcuvidCompat.h
+  // for how the types line up. That is why the whole send/receive state
+  // machine, the frame re-ordering, the cropping and the color conversion below
+  // are shared verbatim, with no subclass involvement at all.
+  //
+  // cuvidMapVideoFrame() is the ninth, and it's why this class needs a subclass
+  // rather than only a compat header. Its contract is one device pointer plus
+  // one pitch for the whole surface. rocDecGetVideoFrame() instead returns
+  // *three* pointers and *three* pitches, one per plane, and promises nothing
+  // about how they relate to one another: not that they are contiguous, not
+  // that they share a pitch.
+  //
+  // So the seam does not hand back a single pointer. map_frame() fills a
+  // MappedSurface, which carries a pointer and a pitch per plane, and each
+  // backend fills it from what its own API actually guarantees: the NVDEC
+  // implementation applies NVIDIA's documented plane stacking to the one
+  // pointer it gets back, and the rocDecode override passes the driver's
+  // per-plane values straight through, unexamined. Nothing is inferred about a
+  // layout either decoder did not state.
+  //
+  // That costs nothing downstream: the color-conversion kernels take a pointer
+  // and a pitch per plane (color_conversion.cpp), and an AVFrame describes its
+  // planes the same way, so the per-plane values flow straight through to
+  // both.
+  //
+  // rocDecode reclaims surfaces internally and has no unmap entry point at all,
+  // so cuvidUnmapVideoFrame() forwards to nothing and unmap_previous_frame()
+  // stays non-virtual.
+  /* clang-format on */
+
+  // A decoded surface as its decoder describes it: one pointer and one pitch
+  // per plane. Two planes are used for NV12 and P016, three for 4:4:4; the
+  // remaining entries stay zero.
+  struct MappedSurface {
+    CUdeviceptr planes[3] = {0, 0, 0};
+    unsigned int pitch[3] = {0, 0, 0};
+  };
+
+  // Makes a decoded frame addressable, on `stream`. Returns an FFmpeg error
+  // code; `surface` is only valid on AVSUCCESS.
+  virtual int map_frame(
+      const CUVIDPARSERDISPINFO& disp_info,
+      cudaStream_t stream,
+      MappedSurface& surface);
 
   int send_cuvid_packet(CUVIDSOURCEDATAPACKET& cuvid_packet);
+
+  enum class Mode { Uninitialized, DecoderOnly, ColorConverterOnly, Both };
+  Mode mode() const;
 
   void send_seqhdr_packet();
 
@@ -115,11 +167,15 @@ class BetaCudaDeviceInterface : public DeviceInterface {
   // consumer is reading. These track that read so the next mapping, in
   // receive_frame(), can be ordered after it.
   CudaEvent surface_read_done_;
-  void record_surface_read(cudaStream_t stream);
+  // Virtual because recording the event is only enough when the decoder honors
+  // the mapping: NVDEC won't reuse a mapped surface, so ordering the next
+  // mapping after this event is sufficient. rocDecode reclaims surfaces on its
+  // own schedule and has no unmap entry point, so the ROCm override has to turn
+  // this into a host-side wait. See the override for why.
+  virtual void record_surface_read(cudaStream_t stream);
 
   UniqueAVFrame convert_cuda_frame_to_av_frame(
-      CUdeviceptr frame_ptr,
-      unsigned int pitch,
+      const MappedSurface& surface,
       const CUVIDPARSERDISPINFO& disp_info);
 
   // Height of the surfaces NVDEC outputs, i.e. the coded height, which is
@@ -129,12 +185,30 @@ class BetaCudaDeviceInterface : public DeviceInterface {
     return static_cast<int>(video_format_.coded_height);
   }
 
-  struct CropOffsets {
-    unsigned int luma;
-    unsigned int chroma;
-  };
+  // Number of luma rows one plane occupies in the surface allocation. This is
+  // what separates one plane from the next: the planes are stacked in a single
+  // allocation, so plane i begins pitch * plane_rows() bytes in.
+  //
+  // NVDEC stacks them at the coded height, rounded up to even. That is not a
+  // universal truth, though - it is a property of whoever allocated the
+  // surface, and a backend whose allocator pads the luma plane further has to
+  // say so.
+  //
+  // rocDecode is such a backend. Its surfaces come from the VA-API driver,
+  // which pads the luma plane up to its own alignment: a 200-row HEVC frame
+  // gets a 208-row luma plane, so chroma starts 8 rows later than this formula
+  // would predict. It says so by reporting each plane's address itself, so
+  // BetaRocmDeviceInterface never derives a plane from this at all. What is
+  // left is a row count, which both backends can use: a padded plane is taller
+  // than this, never shorter. See Note: [Mapping a rocDecode surface].
+  int plane_rows() const {
+    return round_up_to_even(surface_height());
+  }
 
-  CropOffsets get_crop_offsets(unsigned int pitch) const;
+  // Byte offset from the start of `plane` to the first sample of the display
+  // area. Takes the pitch of that same plane: the planes are described
+  // individually, so each one's crop is measured in its own rows.
+  unsigned int crop_offset(int plane, unsigned int plane_pitch) const;
 
   void make_frame_standalone(UniqueAVFrame& av_frame) override;
 

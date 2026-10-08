@@ -18,6 +18,13 @@ the decoded tensor in GPU memory so the GPU doesn't have to fetch from main memo
 running the transform steps. Encoded packets are often much smaller than decoded frames so
 CUDA decoding also uses less PCI-e bandwidth.
 
+This tutorial applies unchanged to AMD GPUs. Under a ROCm build of PyTorch,
+``torch.device("cuda")`` *is* the AMD GPU, so every line below runs as written:
+decoding goes through `rocDecode <https://rocm.docs.amd.com/projects/rocDecode/en/latest/>`_
+on the GPU's VCN engine instead of NVDEC, and the RGB conversion runs the very
+same kernels, built as HIP. Hardware support follows AMD's
+`decoder support matrix <https://rocm.docs.amd.com/projects/rocDecode/en/latest/reference/codec-support-matrix.html>`_.
+
 Installing TorchCodec with CUDA Enabled
 ---------------------------------------
 
