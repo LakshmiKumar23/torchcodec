@@ -45,19 +45,9 @@ class BetaRocmDeviceInterface : public BetaCudaDeviceInterface {
   int map_frame(
       const CUVIDPARSERDISPINFO& disp_info,
       cudaStream_t stream,
-      CUdeviceptr& frame_ptr,
-      unsigned int& pitch) override;
-
-  int plane_rows() const override;
+      MappedSurface& surface) override;
 
   void record_surface_read(cudaStream_t stream) override;
-
- private:
-  // How far apart rocDecode placed the planes of the last surface we mapped,
-  // in luma rows. Learned from the driver in map_frame() rather than computed,
-  // and 0 until the first successful mapping. See Note: [Mapping a rocDecode
-  // surface].
-  int mapped_plane_rows_ = 0;
 };
 
 } // namespace facebook::torchcodec

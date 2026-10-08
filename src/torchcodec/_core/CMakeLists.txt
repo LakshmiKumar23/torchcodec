@@ -804,6 +804,18 @@ make_torchcodec_heic_library()
 # build without ROCm support, which is how the missing-dependency path below
 # behaves.
 if(ENABLE_ROCM)
+    # HIP only became a language CMake knows how to enable in 3.21, so on an
+    # older CMake check_language(HIP) finds nothing no matter how complete the
+    # ROCm install is. Say so, instead of letting the warning below blame a
+    # missing compiler for what is a build-tool version problem.
+    if(CMAKE_VERSION VERSION_LESS 3.21)
+        message(
+            FATAL_ERROR
+            "ENABLE_ROCM requires CMake 3.21 or newer (HIP became a first-class "
+            "CMake language in 3.21), but this is CMake ${CMAKE_VERSION}."
+        )
+    endif()
+
     include(CheckLanguage)
     check_language(HIP)
     if(CMAKE_HIP_COMPILER)

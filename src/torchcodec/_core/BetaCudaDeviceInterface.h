@@ -97,27 +97,44 @@ class BetaCudaDeviceInterface : public DeviceInterface {
   // are shared verbatim, with no subclass involvement at all.
   //
   // cuvidMapVideoFrame() is the ninth, and it's why this class needs a subclass
-  // rather than only a compat header. Its contract is one device
-  // pointer plus one pitch, from which the shared code derives the chroma
-  // planes arithmetically. rocDecGetVideoFrame() instead returns *three*
-  // pointers and *three* pitches, one per plane, and does not promise they are
-  // contiguous or share a pitch. Forwarding it would mean discarding two thirds
-  // of its output and assuming a layout AMD never guaranteed - which would show
-  // up as silently wrong chroma, not as a failure. So the mapping is virtual,
-  // and the ROCm override keeps all three planes.
+  // rather than only a compat header. Its contract is one device pointer plus
+  // one pitch for the whole surface. rocDecGetVideoFrame() instead returns
+  // *three* pointers and *three* pitches, one per plane, and promises nothing
+  // about how they relate to one another: not that they are contiguous, not
+  // that they share a pitch.
+  //
+  // So the seam does not hand back a single pointer. map_frame() fills a
+  // MappedSurface, which carries a pointer and a pitch per plane, and each
+  // backend fills it from what its own API actually guarantees: the NVDEC
+  // implementation applies NVIDIA's documented plane stacking to the one
+  // pointer it gets back, and the rocDecode override passes the driver's
+  // per-plane values straight through, unexamined. Nothing is inferred about a
+  // layout either decoder did not state.
+  //
+  // That costs nothing downstream: the color-conversion kernels take a pointer
+  // and a pitch per plane (color_conversion.cpp), and an AVFrame describes its
+  // planes the same way, so the per-plane values flow straight through to
+  // both.
   //
   // rocDecode reclaims surfaces internally and has no unmap entry point at all,
   // so cuvidUnmapVideoFrame() forwards to nothing and unmap_previous_frame()
   // stays non-virtual.
   /* clang-format on */
 
+  // A decoded surface as its decoder describes it: one pointer and one pitch
+  // per plane. Two planes are used for NV12 and P016, three for 4:4:4; the
+  // remaining entries stay zero.
+  struct MappedSurface {
+    CUdeviceptr planes[3] = {0, 0, 0};
+    unsigned int pitch[3] = {0, 0, 0};
+  };
+
   // Makes a decoded frame addressable, on `stream`. Returns an FFmpeg error
-  // code; frame_ptr and pitch are only valid on AVSUCCESS.
+  // code; `surface` is only valid on AVSUCCESS.
   virtual int map_frame(
       const CUVIDPARSERDISPINFO& disp_info,
       cudaStream_t stream,
-      CUdeviceptr& frame_ptr,
-      unsigned int& pitch);
+      MappedSurface& surface);
 
   int send_cuvid_packet(CUVIDSOURCEDATAPACKET& cuvid_packet);
 
@@ -158,8 +175,7 @@ class BetaCudaDeviceInterface : public DeviceInterface {
   virtual void record_surface_read(cudaStream_t stream);
 
   UniqueAVFrame convert_cuda_frame_to_av_frame(
-      CUdeviceptr frame_ptr,
-      unsigned int pitch,
+      const MappedSurface& surface,
       const CUVIDPARSERDISPINFO& disp_info);
 
   // Height of the surfaces NVDEC outputs, i.e. the coded height, which is
@@ -178,23 +194,21 @@ class BetaCudaDeviceInterface : public DeviceInterface {
   // surface, and a backend whose allocator pads the luma plane further has to
   // say so.
   //
-  // rocDecode is such a backend, which is why this is virtual. Its surfaces
-  // come from the VA-API driver, which pads the luma plane up to its own
-  // alignment: a 200-row HEVC frame gets a 208-row luma plane, so chroma
-  // starts 8 rows later than this formula would predict.
-  // BetaRocmDeviceInterface overrides this with the offsets the driver itself
-  // reports, rather than guessing at the alignment. See Note: [Mapping a
-  // rocDecode surface].
-  virtual int plane_rows() const {
+  // rocDecode is such a backend. Its surfaces come from the VA-API driver,
+  // which pads the luma plane up to its own alignment: a 200-row HEVC frame
+  // gets a 208-row luma plane, so chroma starts 8 rows later than this formula
+  // would predict. It says so by reporting each plane's address itself, so
+  // BetaRocmDeviceInterface never derives a plane from this at all. What is
+  // left is a row count, which both backends can use: a padded plane is taller
+  // than this, never shorter. See Note: [Mapping a rocDecode surface].
+  int plane_rows() const {
     return round_up_to_even(surface_height());
   }
 
-  struct CropOffsets {
-    unsigned int luma;
-    unsigned int chroma;
-  };
-
-  CropOffsets get_crop_offsets(unsigned int pitch) const;
+  // Byte offset from the start of `plane` to the first sample of the display
+  // area. Takes the pitch of that same plane: the planes are described
+  // individually, so each one's crop is measured in its own rows.
+  unsigned int crop_offset(int plane, unsigned int plane_pitch) const;
 
   void make_frame_standalone(UniqueAVFrame& av_frame) override;
 
