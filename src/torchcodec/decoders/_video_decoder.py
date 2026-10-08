@@ -46,7 +46,9 @@ class CpuFallbackStatus:
     :func:`~torchcodec.decoders.set_cuda_backend`), this is always ``True``
     immediately after decoder creation. For the FFmpeg CUDA backend, this
     becomes ``True`` after decoding the first frame."""
-    _nvcuvid_unavailable: bool = field(default=False, init=False)
+    # Name of the hardware decoding library that was missing, if that is why we
+    # fell back: "NVCUVID" on NVIDIA, "rocDecode" on ROCm. Empty otherwise.
+    _unavailable_driver: str = field(default="", init=False)
     _video_not_supported: bool = field(default=False, init=False)
     _is_fallback: bool = field(default=False, init=False)
     _backend: str = field(default="", init=False)
@@ -61,8 +63,8 @@ class CpuFallbackStatus:
             return f"[{self._backend}] Fallback status: Unknown"
 
         reasons = []
-        if self._nvcuvid_unavailable:
-            reasons.append("NVcuvid unavailable")
+        if self._unavailable_driver:
+            reasons.append(f"{self._unavailable_driver} unavailable")
         elif self._video_not_supported:
             reasons.append("Video not supported")
         elif self._is_fallback:
@@ -298,10 +300,17 @@ class VideoDecoder:
                 if "CPU fallback" in backend_details:
                     self._cpu_fallback._is_fallback = True
                     if self._cpu_fallback._backend == "CUDA":
-                        # Only the NVDEC interface can provide details.
-                        # if it's not that nvcuvid is missing, it must be video-specific
-                        if "NVCUVID not available" in backend_details:
-                            self._cpu_fallback._nvcuvid_unavailable = True
+                        # Only the beta interfaces can provide details, and each
+                        # names its own decoding library: "NVCUVID not
+                        # available!" for NVDEC, "rocDecode not available!" for
+                        # ROCm. Match on the shared suffix so this stays correct
+                        # for both rather than silently reporting a missing
+                        # backend as an unsupported video.
+                        driver, sep, _ = backend_details.partition(" not available!")
+                        if sep:
+                            self._cpu_fallback._unavailable_driver = driver.rsplit(
+                                " ", 1
+                            )[-1]
                         else:
                             self._cpu_fallback._video_not_supported = True
 

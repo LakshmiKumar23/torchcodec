@@ -203,15 +203,19 @@ and CUDA paths share their decode and conversion logic rather than
 reimplementing it.
 
 **Requirements:**
-- ROCm with rocDecode 1.8.0 or above, which the build checks for
+- ROCm 10.1 or newer, which supplies rocDecode (1.8.0 or above) in its core
+  SDK. The build checks the rocDecode version.
 - AMD GPU with VCN (Video Core Next) support
 - PyTorch compiled with ROCm support
 
 **Installation:**
 
-1. Install ROCm following AMD's [ROCm installation
-   guide](https://rocm.docs.amd.com/). rocDecode ships with ROCm, so a current
-   install already satisfies the decoder dependency.
+1. Install ROCm 10.1 or newer following AMD's [ROCm installation
+   guide](https://rocm.docs.amd.com/). rocDecode is part of the ROCm core SDK,
+   so a core SDK install already satisfies the decoder dependency. If you
+   installed only base ROCm, rocDecode is available as a separate package —
+   `packaging/install_rocdecode.sh` in this repository installs it along with
+   the AMD VA-API driver that rocDecode needs at runtime.
 
 2. Install PyTorch with ROCm support, matching the ROCm version you installed:
 
@@ -223,15 +227,24 @@ reimplementing it.
    documentation](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/index.html)
    for the latest instructions and the available index URLs.
 
-3. Install TorchCodec:
+3. Install TorchCodec. ROCm-enabled wheels are not published yet, so build from
+   source with `ENABLE_ROCM=1` (see CONTRIBUTING.md for the general build
+   setup):
 
    ```bash
-   # ROCm-enabled wheels are not yet available
-   # For now, build from source following the instructions in CONTRIBUTING.md
+   git clone https://github.com/pytorch/torchcodec.git
+   cd torchcodec
+   # ROCM_PATH is required: the build uses it to find HIP and rocDecode.
+   # /opt/rocm is the default system install; inside a ROCm venv it is the
+   # _rocm_sdk_devel directory of that environment instead.
+   export ROCM_PATH=/opt/rocm
+   ENABLE_ROCM=1 pip install -e ".[dev]" --no-build-isolation -vv
    ```
 
-   > **Note:** Pre-built ROCm wheels for TorchCodec are coming soon. Until then,
-   > you'll need to build from source with ROCm support enabled.
+   > **Note:** If HIP or rocDecode cannot be found, the build prints a warning,
+   > turns ROCm support back off and produces a **CPU-only** package rather than
+   > failing. Watch the configure output for `Skipping ROCm support`, and use
+   > the verification step below to confirm what you actually got.
 
 **Verification:**
 

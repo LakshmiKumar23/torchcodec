@@ -40,6 +40,7 @@ from .utils import (
     needs_cuda,
     needs_ffmpeg_cli,
     needs_jpeg,
+    needs_nvidia,
     needs_png,
     psnr,
     SINE_MONO_S32,
@@ -218,12 +219,20 @@ class TestVideoEncoder:
 
 
 class TestEncoder:
+    # Note: [GPU encoding is NVIDIA-only]
+    # Encoding to a CUDA device goes through the FFmpeg CUDA device interface
+    # (Encoder.cpp hardcodes the "ffmpeg" variant for CUDA devices) and encodes
+    # with NVENC. That backend is NVIDIA-only by construction and is rejected on
+    # ROCm, so every GPU encoding param needs needs_nvidia on top of needs_cuda,
+    # which passes on ROCm. This is not papering over a ROCm bug: TorchCodec has
+    # no AMD GPU encoder at all today.
     cpu_and_oss_cuda = (
         "cpu",
         pytest.param(
             "cuda",
             marks=[
                 pytest.mark.needs_cuda,
+                pytest.mark.needs_nvidia,
                 pytest.mark.skipif(in_fbcode(), reason="NVENC not available in fbcode"),
             ],
         ),
@@ -425,6 +434,7 @@ class TestEncoder:
             video.add_frames(frames_512)
 
     @needs_cuda
+    @needs_nvidia
     @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
     def test_write_frames_different_devices_errors(self, tmp_path, method):
         cpu_frames = torch.randint(0, 256, (2, 3, 256, 256), dtype=torch.uint8)
@@ -449,6 +459,7 @@ class TestEncoder:
             video.add_frames(cpu_frames)
 
     @needs_cuda
+    @needs_nvidia
     @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
     def test_device_None_respects_default_device(self, tmp_path, method):
         source_decoder = VideoDecoder(str(TEST_SRC_2_720P.path))
@@ -495,6 +506,7 @@ class TestEncoder:
         assert decoded_frames.shape == frames.shape
 
     @needs_cuda
+    @needs_nvidia
     @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
     def test_device_cuda_0_string(self, tmp_path, method):
         source_decoder = VideoDecoder(str(TEST_SRC_2_720P.path))
@@ -533,7 +545,14 @@ class TestEncoder:
 
     @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
     @pytest.mark.parametrize(
-        "device", ("cpu", pytest.param("cuda", marks=pytest.mark.needs_cuda))
+        "device",
+        (
+            "cpu",
+            pytest.param(
+                "cuda",
+                marks=[pytest.mark.needs_cuda, pytest.mark.needs_nvidia],
+            ),
+        ),
     )
     def test_write_frames_without_open_errors(self, tmp_path, method, device):
         enc, _, open_kwargs = self._create_encoder(method, tmp_path, "mp4")
@@ -718,6 +737,7 @@ class TestEncoder:
         )
 
     @needs_cuda
+    @needs_nvidia
     @pytest.mark.skipif(in_fbcode(), reason="NVENC not available in fbcode")
     @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
     def test_cuda_video_with_cpu_video_and_cpu_audio(self, tmp_path, method):
@@ -1412,6 +1432,7 @@ class TestEncoder:
                 "cuda",
                 marks=[
                     pytest.mark.needs_cuda,
+                    pytest.mark.needs_nvidia,
                     pytest.mark.skipif(
                         in_fbcode(), reason="NVENC not available in fbcode"
                     ),
@@ -1632,6 +1653,7 @@ class TestEncoder:
             self._open_encoder(enc2, open_kwargs2)
 
     @needs_cuda
+    @needs_nvidia
     @pytest.mark.skipif(in_fbcode(), reason="NVENC not available in fbcode")
     @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
     def test_pixel_format_gpu_override_errors(self, method, tmp_path):
@@ -2187,6 +2209,7 @@ class TestEncoder:
 
     @needs_ffmpeg_cli
     @needs_cuda
+    @needs_nvidia
     @pytest.mark.skipif(in_fbcode(), reason="NVENC not available in fbcode")
     @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
     @pytest.mark.parametrize(
@@ -2415,7 +2438,16 @@ class TestEncoder:
             self._open_encoder(enc, open_kwargs)
 
 
-_cpu_and_cuda = ("cpu", pytest.param("cuda", marks=pytest.mark.needs_cuda))
+# Note: [GPU JPEG encoding is NVIDIA-only]
+# GPU JPEG *encoding* is nvJPEG-only. Unlike decoding, where rocJPEG is the AMD
+# counterpart and the cuda params are left visibly failing until it is wired up,
+# ROCm has no GPU JPEG encoder at all - so there is nothing for these tests to
+# exercise on AMD and needs_nvidia is the correct gate rather than a way of
+# hiding a ROCm gap. needs_cuda alone is not enough: it passes on ROCm.
+_cpu_and_cuda = (
+    "cpu",
+    pytest.param("cuda", marks=(pytest.mark.needs_cuda, pytest.mark.needs_nvidia)),
+)
 
 
 _image_encoders = (
@@ -2424,7 +2456,11 @@ _image_encoders = (
     pytest.param(
         JpegEncoder,
         "cuda",
-        marks=(pytest.mark.needs_jpeg, pytest.mark.needs_cuda),
+        marks=(
+            pytest.mark.needs_jpeg,
+            pytest.mark.needs_cuda,
+            pytest.mark.needs_nvidia,
+        ),
         id="jpeg_cuda",
     ),
 )
@@ -2660,6 +2696,7 @@ class TestImageEncoders:
             )
 
     @needs_cuda
+    @needs_nvidia
     @needs_jpeg
     def test_grayscale_jpeg_cuda_errors(self):
         # nvJPEG encoding only supports 3-channel RGB; grayscale must use the CPU.
