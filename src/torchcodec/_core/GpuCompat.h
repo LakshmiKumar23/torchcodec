@@ -39,6 +39,14 @@
 // does not test that macro.
 /* clang-format on */
 
+// CMakeLists.txt rejects ENABLE_CUDA together with ENABLE_ROCM; this is the
+// same invariant stated where it actually matters, so a build system that does
+// not go through that check (e.g. Bazel) cannot quietly define both.
+#if defined(USE_ROCM) && defined(USE_CUDA)
+#error \
+    "USE_CUDA and USE_ROCM are mutually exclusive: torchcodec compiles exactly one GPU backend at a time."
+#endif
+
 #if defined(USE_ROCM)
 
 // The HIP headers refuse to compile unless a platform is selected. hipcc

@@ -16,6 +16,21 @@ if(SKBUILD_STATE STREQUAL "wheel"
         "then set I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION.")
 endif()
 
+# The two GPU backends are mutually exclusive by construction. The color
+# conversion kernels and the CUDA runtime calls in CUDACommon /
+# BetaCudaDeviceInterface are a *single* set of sources, compiled either as CUDA
+# or as HIP, with GpuCompat.h aliasing the CUDA spellings onto HIP when USE_ROCM
+# is defined. Setting both flags would append both source lists, define both
+# USE_CUDA and USE_ROCM, and force color_conversion.cu to the HIP language for
+# everyone - so fail loudly here rather than build a library against the wrong
+# backend. Each CI job builds exactly one backend, so this only catches a stale
+# ENABLE_ROCM/ENABLE_CUDA in a developer's environment.
+if(ENABLE_CUDA AND ENABLE_ROCM)
+    message(FATAL_ERROR
+        "ENABLE_CUDA and ENABLE_ROCM cannot both be set: torchcodec builds "
+        "exactly one GPU backend at a time. Unset one of them and reconfigure.")
+endif()
+
 set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 REQUIRED)
 find_package(Torch REQUIRED)
