@@ -348,10 +348,15 @@ function(make_torchcodec_libraries
         list(APPEND core_sources ${TORCHCODEC_DECODER_CORE_CUDA_SOURCES})
     endif()
 
-    set(_torchcodec_rocm_deps_ok FALSE)
     if(ENABLE_ROCM)
         # ROCm builds require HIP and the rocDecode CMake package from the same
-        # ROCm install (https://github.com/ROCm/TheRock)
+        # ROCm install (https://github.com/ROCm/TheRock).
+        #
+        # ENABLE_ROCM is never set by detection - it defaults to empty in
+        # pyproject.toml - so reaching here means someone asked for a ROCm
+        # build. Missing dependencies are therefore a build failure, not a
+        # reason to quietly hand back a CPU-only package that looks like a
+        # successful install and only reveals itself as a slow decode later.
         if(DEFINED ENV{ROCM_PATH})
             list(APPEND CMAKE_PREFIX_PATH "$ENV{ROCM_PATH}")
         else()
@@ -364,9 +369,7 @@ function(make_torchcodec_libraries
         endif()
         find_package(hip QUIET)
         find_package(rocdecode 1.8.0 CONFIG QUIET)
-        if(hip_FOUND AND rocdecode_FOUND)
-            set(_torchcodec_rocm_deps_ok TRUE)
-        else()
+        if(NOT (hip_FOUND AND rocdecode_FOUND))
             set(_missing_rocm_deps "")
             if(NOT hip_FOUND)
                 list(APPEND _missing_rocm_deps "HIP")
@@ -375,15 +378,15 @@ function(make_torchcodec_libraries
                 list(APPEND _missing_rocm_deps "rocDecode (>= 1.8.0, CONFIG)")
             endif()
             message(
-                WARNING
+                FATAL_ERROR
                 "ENABLE_ROCM requires HIP and rocDecode. Missing: ${_missing_rocm_deps}. "
-                "Skipping ROCm support. Set ROCM_PATH if CMake cannot find your ROCm install."
+                "Set ROCM_PATH to your ROCm install prefix if CMake cannot find it, or "
+                "unset ENABLE_ROCM to build without ROCm support."
             )
-            set(ENABLE_ROCM OFF)
         endif()
     endif()
 
-    if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
+    if(ENABLE_ROCM)
         # Note that the HIP language itself is enabled at file scope, near the
         # bottom of this file - see the comment there for why it cannot live
         # here with the rest of the ROCm setup.
@@ -425,7 +428,7 @@ function(make_torchcodec_libraries
         endif()
     endif()
 
-    if(ENABLE_ROCM AND _torchcodec_rocm_deps_ok)
+    if(ENABLE_ROCM)
         # Link ROCm libraries and add include directories.
         #
         # rocdecode::rocdecode is deliberately NOT linked. librocdecode.so.1 is
@@ -799,14 +802,14 @@ make_torchcodec_heic_library()
 #     Error required internal CMake variable not set [...]
 #     Missing variable is: CMAKE_HIP_COMPILE_OBJECT
 # check_language() is the documented way to probe first, since enable_language's
-# OPTIONAL keyword does not actually work. Without it, a machine that sets
-# ENABLE_ROCM but has no hipcc would hard-error here instead of configuring a
-# build without ROCm support, which is how the missing-dependency path below
-# behaves.
+# OPTIONAL keyword does not actually work. A missing hipcc fails the build either
+# way - that is the point, see the deps check in make_torchcodec_libraries() -
+# but probing first is what lets us say which dependency is missing and how to
+# point CMake at it, rather than surfacing enable_language's internal error.
 if(ENABLE_ROCM)
     # HIP only became a language CMake knows how to enable in 3.21, so on an
     # older CMake check_language(HIP) finds nothing no matter how complete the
-    # ROCm install is. Say so, instead of letting the warning below blame a
+    # ROCm install is. Say so, instead of letting the error below blame a
     # missing compiler for what is a build-tool version problem.
     if(CMAKE_VERSION VERSION_LESS 3.21)
         message(
@@ -822,11 +825,11 @@ if(ENABLE_ROCM)
         enable_language(HIP)
     else()
         message(
-            WARNING
+            FATAL_ERROR
             "ENABLE_ROCM is set but CMake could not find a HIP compiler. "
-            "Skipping ROCm support. Set ROCM_PATH if CMake cannot find your ROCm install."
+            "Set ROCM_PATH to your ROCm install prefix if CMake cannot find it, or "
+            "unset ENABLE_ROCM to build without ROCm support."
         )
-        set(ENABLE_ROCM OFF)
     endif()
 endif()
 

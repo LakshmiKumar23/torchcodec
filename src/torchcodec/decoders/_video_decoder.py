@@ -303,14 +303,15 @@ class VideoDecoder:
                         # Only the beta interfaces can provide details, and each
                         # names its own decoding library: "NVCUVID not
                         # available!" for NVDEC, "rocDecode not available!" for
-                        # ROCm. Match on the shared suffix so this stays correct
-                        # for both rather than silently reporting a missing
-                        # backend as an unsupported video.
-                        driver, sep, _ = backend_details.partition(" not available!")
-                        if sep:
-                            self._cpu_fallback._unavailable_driver = driver.rsplit(
-                                " ", 1
-                            )[-1]
+                        # ROCm. Match each name in full rather than cutting the
+                        # string at " not available!" and taking the word
+                        # before it: an unrecognised driver then falls to the
+                        # else branch below, instead of reporting whatever word
+                        # happened to sit in that position.
+                        for driver in ("NVCUVID", "rocDecode"):
+                            if f"{driver} not available!" in backend_details:
+                                self._cpu_fallback._unavailable_driver = driver
+                                break
                         else:
                             self._cpu_fallback._video_not_supported = True
 

@@ -153,6 +153,13 @@ CUresult BetaRocmDeviceInterface::map_frame(
 // So we wait on the host: once this returns, the copy has landed and rocDecode
 // is free to reclaim the surface. That costs one host sync per frame, which is
 // the price of a decoder that will not tell us when it reuses its surfaces.
+//
+// TODO: revisit if rocDecode gains a way to express surface lifetime - an
+// explicit unmap, or a signal on the decode queue we could wait on from a
+// stream. Either would let this drop back to the base class's event gate and
+// take the host out of the per-frame path. Until then the sync is load-bearing:
+// removing it reintroduces the torn frames described above, so it should be
+// measured and re-justified rather than quietly deleted.
 /* clang-format on */
 
 void BetaRocmDeviceInterface::record_surface_read(cudaStream_t stream) {

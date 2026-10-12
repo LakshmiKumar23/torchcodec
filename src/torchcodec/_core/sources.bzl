@@ -68,11 +68,21 @@ decoder_core_cuda_sources = [
     "color_conversion.cu",
 ]
 
+# CUDA sources with no ROCm counterpart, subtracted from the ROCm list below.
+# CudaDeviceInterface.cpp is the non-beta, FFmpeg-hwaccel CUDA interface; the
+# ROCm port covers the beta NVDEC interface only.
+_cuda_only_sources = [
+    "CudaDeviceInterface.cpp",
+]
+
 # ROCm sources, added to the core library only for ROCm-enabled builds.
 #
-# The first group is compiled by the CUDA build too - it is listed verbatim in
-# decoder_core_cuda_sources above, and the two lists must be kept in sync by
-# hand. On ROCm these files are compiled as HIP: the CUDA runtime names they use
+# Derived from decoder_core_cuda_sources rather than restated, so the two builds
+# cannot drift: a file added there is compiled by the ROCm build too unless it is
+# named in _cuda_only_sources, which is a deliberate choice rather than an
+# oversight.
+#
+# The shared files are compiled as HIP here: the CUDA runtime names they use
 # resolve through CUDACompat.h, and the NVCUVID entry points they call are
 # implemented on top of rocDecode in the USE_ROCM block at the end of
 # BetaCudaDeviceInterface.cpp. Sharing the sources - rather than maintaining a
@@ -86,13 +96,11 @@ decoder_core_cuda_sources = [
 # reports failure the same way, which is what lets the interface fall back to
 # CPU decoding instead of crashing.
 decoder_core_rocm_sources = [
-    "BetaCudaDeviceInterface.cpp",
+    src
+    for src in decoder_core_cuda_sources
+    if src not in _cuda_only_sources
+] + [
     "BetaRocmDeviceInterface.cpp",
-    "NVCUVIDRuntimeLoader.cpp",
-    "NVDECCache.cpp",
-    "CUDACommon.cpp",
-    "color_conversion.cpp",
-    "color_conversion.cu",
 ]
 
 file_like_context_sources = [

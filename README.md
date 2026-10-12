@@ -241,10 +241,9 @@ reimplementing it.
    ENABLE_ROCM=1 pip install -e ".[dev]" --no-build-isolation -vv
    ```
 
-   > **Note:** If HIP or rocDecode cannot be found, the build prints a warning,
-   > turns ROCm support back off and produces a **CPU-only** package rather than
-   > failing. Watch the configure output for `Skipping ROCm support`, and use
-   > the verification step below to confirm what you actually got.
+   > **Note:** If HIP or rocDecode cannot be found, the build fails and names
+   > the missing dependency. `ENABLE_ROCM=1` is a request, not a hint, so it
+   > will not quietly fall back to producing a CPU-only package.
 
 **Verification:**
 
