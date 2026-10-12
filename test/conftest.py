@@ -8,6 +8,7 @@ from .utils import (
     avif_is_available,
     heic_is_available,
     in_fbcode,
+    is_rocm,
     jpeg_is_available,
     png_is_available,
     webp_is_available,
@@ -18,6 +19,13 @@ def pytest_configure(config):
     # register an additional marker (see pytest_collection_modifyitems)
     config.addinivalue_line(
         "markers", "needs_cuda: mark for tests that rely on a CUDA device"
+    )
+    config.addinivalue_line(
+        "markers", "needs_rocm: mark for tests that rely on a ROCm device"
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_nvidia: mark for tests that rely on an NVIDIA GPU specifically",
     )
     config.addinivalue_line(
         "markers", "needs_ffmpeg_cli: mark for tests that rely on ffmpeg"
@@ -82,6 +90,8 @@ def pytest_collection_modifyitems(items):
         # 'needs_cuda' mark, and the ones with device == 'cpu' won't have the
         # mark.
         needs_cuda = item.get_closest_marker("needs_cuda") is not None
+        needs_rocm = item.get_closest_marker("needs_rocm") is not None
+        needs_nvidia = item.get_closest_marker("needs_nvidia") is not None
         needs_ffmpeg_cli = item.get_closest_marker("needs_ffmpeg_cli") is not None
         needs_jpeg = item.get_closest_marker("needs_jpeg") is not None
         needs_png = item.get_closest_marker("needs_png") is not None
@@ -129,6 +139,29 @@ def pytest_collection_modifyitems(items):
             # supposed to run the CUDA tests, so if CUDA isn't available on
             # those for whatever reason, we need to know.
             item.add_marker(pytest.mark.skip(reason="CUDA not available."))
+
+        # needs_nvidia is a strict refinement of needs_cuda: the test needs a
+        # GPU *and* that GPU must be an NVIDIA one. Tests carry both marks, so
+        # the needs_cuda branch above already covers "no GPU at all" and this
+        # one only has to rule out an AMD GPU. Note there is deliberately no
+        # FAIL_WITHOUT_* escape hatch: a ROCm box will never grow an NVIDIA
+        # GPU, so forcing these to run could only ever produce noise.
+        if needs_nvidia and is_rocm():
+            item.add_marker(
+                pytest.mark.skip(reason="Needs an NVIDIA GPU, this is a ROCm build.")
+            )
+
+        if (
+            needs_rocm
+            and not (torch.cuda.is_available() and is_rocm())
+            and os.environ.get("FAIL_WITHOUT_ROCM") is None
+        ):
+            # We skip ROCm tests on non-ROCm machines, but only if the
+            # FAIL_WITHOUT_ROCM env var wasn't set. If it's set, the test will
+            # typically fail. This env var is set on CI jobs that are supposed
+            # to run the ROCm tests, so if ROCm isn't available on those for
+            # whatever reason, we need to know.
+            item.add_marker(pytest.mark.skip(reason="ROCm not available."))
 
         # Same rationale as needs_cuda; see skip_image_decoder_test().
         if needs_jpeg and skip_image_decoder_test("jpeg"):

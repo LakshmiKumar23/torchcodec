@@ -6,10 +6,10 @@
 
 #pragma once
 
-#include <cuda_runtime.h>
 #include <cstdint>
 #include <optional>
 
+#include "CUDACompat.h"
 #include "FFMPEGCommon.h"
 #include "Frame.h"
 

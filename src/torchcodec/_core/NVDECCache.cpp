@@ -11,10 +11,9 @@
 #include "NVDECCache.h"
 #include "NVDECCacheConfig.h"
 
-#include <cuda_runtime.h> // For cudaGetDevice
+#include "CUDACompat.h" // For cudaGetDevice
 
 extern "C" {
-#include <libavutil/hwcontext_cuda.h>
 #include <libavutil/pixdesc.h>
 }
 
