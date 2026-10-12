@@ -129,9 +129,12 @@ class BetaCudaDeviceInterface : public DeviceInterface {
     unsigned int pitch[3] = {0, 0, 0};
   };
 
-  // Makes a decoded frame addressable, on `stream`. Returns an FFmpeg error
-  // code; `surface` is only valid on AVSUCCESS.
-  virtual int map_frame(
+  // Makes a decoded frame addressable, on `stream`. Returns the decode API's
+  // own status - CUresult on NVDEC, the rocDecStatus it is aliased to on ROCm
+  // (NvcuvidCompat.h) - so the vendor's error reaches the caller instead of
+  // being flattened into a single FFmpeg code here. `surface` is only valid on
+  // CUDA_SUCCESS.
+  virtual CUresult map_frame(
       const CUVIDPARSERDISPINFO& disp_info,
       cudaStream_t stream,
       MappedSurface& surface);

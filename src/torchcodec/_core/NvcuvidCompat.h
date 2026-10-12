@@ -11,7 +11,7 @@
 /* clang-format off */
 // Note: [Compiling BetaCudaDeviceInterface for both NVDEC and rocDecode]
 //
-// This is the NVCUVID counterpart of GpuCompat.h, and it follows the same rule:
+// This is the NVCUVID counterpart of CUDACompat.h, and it follows the same rule:
 // the CUDA spelling is the canonical one throughout torchcodec, and the ROCm
 // build aliases it onto the equivalent rocDecode type. BetaCudaDeviceInterface
 // is written against NVCUVID, exactly as it always was; BetaRocmDeviceInterface
@@ -73,9 +73,9 @@
 #if defined(USE_ROCM)
 
 // Must come first: rocdecode.h includes <hip/hip_runtime.h> directly, which
-// hard-errors unless a HIP platform has been selected. GpuCompat.h is where we
+// hard-errors unless a HIP platform has been selected. CUDACompat.h is where we
 // select it.
-#include "GpuCompat.h"
+#include "CUDACompat.h"
 
 #include <rocdecode/rocdecode.h>
 #include <rocdecode/rocparser.h>
@@ -146,7 +146,7 @@ constexpr cudaVideoCodec cudaVideoCodec_VP9 = rocDecVideoCodec_VP9;
 using CUresult = rocDecStatus;
 constexpr CUresult CUDA_SUCCESS = ROCDEC_SUCCESS;
 
-// The driver-API stream handle. GpuCompat.h aliases the runtime-API one
+// The driver-API stream handle. CUDACompat.h aliases the runtime-API one
 // (cudaStream_t) to the same HIP type, which is what makes the
 // reinterpret_cast in map_frame() a no-op here rather than a reinterpretation.
 using CUstream = hipStream_t;

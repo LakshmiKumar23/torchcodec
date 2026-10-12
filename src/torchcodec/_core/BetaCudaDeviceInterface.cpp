@@ -1008,9 +1008,9 @@ int BetaCudaDeviceInterface::receive_frame(UniqueAVFrame& av_frame) {
   surface_read_done_.make_stream_wait(nvdec_output_stream_);
   unmap_previous_frame();
   MappedSurface surface;
-  int status = map_frame(disp_info, nvdec_output_stream_, surface);
-  if (status != AVSUCCESS) {
-    return status;
+  CUresult status = map_frame(disp_info, nvdec_output_stream_, surface);
+  if (status != CUDA_SUCCESS) {
+    return AVERROR_EXTERNAL;
   }
   previously_mapped_frame_ = surface.planes[0];
 
@@ -1029,7 +1029,7 @@ void BetaCudaDeviceInterface::record_surface_read(cudaStream_t stream) {
   surface_read_done_.record(stream);
 }
 
-int BetaCudaDeviceInterface::map_frame(
+CUresult BetaCudaDeviceInterface::map_frame(
     const CUVIDPARSERDISPINFO& disp_info,
     cudaStream_t stream,
     MappedSurface& surface) {
@@ -1050,7 +1050,7 @@ int BetaCudaDeviceInterface::map_frame(
       &pitch,
       &proc_params);
   if (result != CUDA_SUCCESS) {
-    return AVERROR_EXTERNAL;
+    return result;
   }
 
   // NVDEC stacks the planes of the coded frame in a single allocation, all with
@@ -1063,7 +1063,7 @@ int BetaCudaDeviceInterface::map_frame(
     surface.planes[plane] = frame_ptr + (plane_stride * plane);
     surface.pitch[plane] = pitch;
   }
-  return AVSUCCESS;
+  return CUDA_SUCCESS;
 }
 
 void BetaCudaDeviceInterface::unmap_previous_frame() {
@@ -1322,9 +1322,15 @@ torch::stable::Tensor BetaCudaDeviceInterface::copy_nvdec_surface(
   // the stream we're copying on.
   nvdec_surface_ready_.make_stream_wait(current_stream);
 
-  // One copy per plane: the decoder described the planes individually, so we
-  // read each from its own start rather than running off the end of one into
-  // the next. See Note: [The one hardware-decoder seam].
+  // How the surface comes across is the one place the two decode APIs make
+  // genuinely different promises, so it is the one place this function splits.
+  // Either way the destination is the same: plane i lands at plane_offset[i],
+  // and the display area stays crop_offset() bytes into it.
+#if defined(USE_ROCM)
+  // rocDecode describes the planes individually and promises nothing about how
+  // they relate to one another, so each is read from its own start rather than
+  // by running off the end of one into the next. See Note: [Mapping a
+  // rocDecode surface].
   for (int i = 0; i < num_planes; ++i) {
     unsigned int offset_in_plane =
         crop_offset(i, static_cast<unsigned int>(av_frame->linesize[i]));
@@ -1343,6 +1349,32 @@ torch::stable::Tensor BetaCudaDeviceInterface::copy_nvdec_surface(
     // number of rows into it as it was in the surface.
     av_frame->data[i] = storage_base + plane_offset[i] + offset_in_plane;
   }
+#else
+  // NVDEC documents that it stacks the planes back to back in a single
+  // allocation, so the whole surface crosses in one transfer, exactly as it
+  // did before the ROCm port. plane_offset[] above sums the same plane sizes
+  // NVDEC laid out, so the copy is byte-for-byte what a per-plane loop would
+  // produce - this just spends one launch on it instead of num_planes.
+  auto* surface_base = av_frame->data[0] -
+      crop_offset(0, static_cast<unsigned int>(av_frame->linesize[0]));
+
+  cudaError_t err = cudaMemcpyAsync(
+      storage_base,
+      surface_base,
+      static_cast<size_t>(num_bytes),
+      cudaMemcpyDeviceToDevice,
+      current_stream);
+  STD_TORCH_CHECK(
+      err == cudaSuccess,
+      "Failed to copy NVDEC surface: ",
+      cudaGetErrorString(err));
+
+  // Re-point the planes into the copy, preserving where they sat within the
+  // surface: those offsets encode both the plane layout and the display crop.
+  for (int i = 0; i < num_planes; ++i) {
+    av_frame->data[i] = storage_base + (av_frame->data[i] - surface_base);
+  }
+#endif
 
   // The copies are async, so the next mapping must be ordered after them.
   record_surface_read(current_stream);

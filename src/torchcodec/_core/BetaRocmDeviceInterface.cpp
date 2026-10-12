@@ -88,7 +88,7 @@ std::string BetaRocmDeviceInterface::get_details() {
 //   the interlaced paths it guards are not ones we exercise.
 /* clang-format on */
 
-int BetaRocmDeviceInterface::map_frame(
+CUresult BetaRocmDeviceInterface::map_frame(
     const CUVIDPARSERDISPINFO& disp_info,
     [[maybe_unused]] cudaStream_t stream,
     MappedSurface& surface) {
@@ -106,7 +106,7 @@ int BetaRocmDeviceInterface::map_frame(
       plane_pitch,
       &proc_params);
   if (result != ROCDEC_SUCCESS) {
-    return AVERROR_EXTERNAL;
+    return result;
   }
 
   // 4:4:4 surfaces carry three full-size planes; NV12 and P016 carry a luma
@@ -127,7 +127,7 @@ int BetaRocmDeviceInterface::map_frame(
         static_cast<CUdeviceptr>(reinterpret_cast<uintptr_t>(plane_ptr[plane]));
     surface.pitch[plane] = plane_pitch[plane];
   }
-  return AVSUCCESS;
+  return ROCDEC_SUCCESS;
 }
 
 /* clang-format off */

@@ -19,7 +19,7 @@ endif()
 # The two GPU backends are mutually exclusive by construction. The color
 # conversion kernels and the CUDA runtime calls in CUDACommon /
 # BetaCudaDeviceInterface are a *single* set of sources, compiled either as CUDA
-# or as HIP, with GpuCompat.h aliasing the CUDA spellings onto HIP when USE_ROCM
+# or as HIP, with CUDACompat.h aliasing the CUDA spellings onto HIP when USE_ROCM
 # is defined. Setting both flags would append both source lists, define both
 # USE_CUDA and USE_ROCM, and force color_conversion.cu to the HIP language for
 # everyone - so fail loudly here rather than build a library against the wrong

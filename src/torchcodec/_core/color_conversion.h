@@ -9,9 +9,9 @@
 #include <cstdint>
 #include <optional>
 
+#include "CUDACompat.h"
 #include "FFMPEGCommon.h"
 #include "Frame.h"
-#include "GpuCompat.h"
 
 namespace facebook::torchcodec {
 

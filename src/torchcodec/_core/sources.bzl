@@ -73,7 +73,7 @@ decoder_core_cuda_sources = [
 # The first group is compiled by the CUDA build too - it is listed verbatim in
 # decoder_core_cuda_sources above, and the two lists must be kept in sync by
 # hand. On ROCm these files are compiled as HIP: the CUDA runtime names they use
-# resolve through GpuCompat.h, and the NVCUVID entry points they call are
+# resolve through CUDACompat.h, and the NVCUVID entry points they call are
 # implemented on top of rocDecode in the USE_ROCM block at the end of
 # BetaCudaDeviceInterface.cpp. Sharing the sources - rather than maintaining a
 # parallel ROCm implementation - is what makes the two backends bit-exact, since

@@ -11,7 +11,7 @@
 #include "NVDECCache.h"
 #include "NVDECCacheConfig.h"
 
-#include "GpuCompat.h" // For cudaGetDevice
+#include "CUDACompat.h" // For cudaGetDevice
 
 extern "C" {
 #include <libavutil/pixdesc.h>

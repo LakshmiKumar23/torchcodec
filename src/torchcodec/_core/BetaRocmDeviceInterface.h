@@ -42,7 +42,7 @@ class BetaRocmDeviceInterface : public BetaCudaDeviceInterface {
   std::string get_details() override;
 
  protected:
-  int map_frame(
+  CUresult map_frame(
       const CUVIDPARSERDISPINFO& disp_info,
       cudaStream_t stream,
       MappedSurface& surface) override;

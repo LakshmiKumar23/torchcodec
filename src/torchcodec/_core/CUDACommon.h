@@ -11,7 +11,7 @@
 
 #include <optional>
 
-#include "GpuCompat.h"
+#include "CUDACompat.h"
 #include "StableABICompat.h"
 
 namespace facebook::torchcodec {
